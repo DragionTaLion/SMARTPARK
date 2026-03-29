@@ -1,0 +1,27 @@
+# --- Dữ liệu AI (Nặng, không nên đẩy lên GitHub) ---
+data/datasets/
+evaluation_results/
+runs/
+*.jpg
+*.png
+*.mp4
+*.csv
+
+# --- Python & Môi trường ---
+__pycache__/
+*.pyc
+venv/
+.env
+.idea/
+.vscode/
+
+# --- Frontend Dependencies ---
+node_modules/
+dist/
+build/
+*.log
+
+# --- NGOẠI LỆ (Giữ lại những thứ quan trọng để chạy được) ---
+!data/models/             # Giữ lại các file .pt để người khác tải về là chạy được ngay
+!evaluation_results/confusion_matrix.png  # Giữ lại kết quả để "khoe" độ chính xác 90%
+!.env.example
