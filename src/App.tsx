@@ -38,6 +38,10 @@ type DetectionResult = {
   timestamp?: string;
   error?: string;
   reason?: string;
+  entry_image?: string; // Ảnh lúc vào để so sánh
+  occupied?: number;
+  capacity?: number;
+  gate?: string;
 };
 
 type Resident = {
@@ -156,6 +160,19 @@ export default function App() {
   // ── Camera setup ──────────────────────────────────────────────────────────
   useEffect(() => {
     let active = true;
+
+    const syncWithBackend = async () => {
+      try {
+        await apiFetch('/config/camera_source', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source: cameraMode }),
+        });
+      } catch (err) {
+        console.error('Failed to sync camera source with backend:', err);
+      }
+    };
+
     const startCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -171,6 +188,8 @@ export default function App() {
       }
     };
 
+    syncWithBackend();
+
     if (activeTab === 'dashboard' && cameraMode === 'webcam') startCamera();
     return () => {
       active = false;
@@ -179,7 +198,7 @@ export default function App() {
         streamRef.current = null;
       }
     };
-  }, [activeTab]);
+  }, [activeTab, cameraMode]);
 
   // ── Auto-capture & send frame tới AI ─────────────────────────────────────
   useEffect(() => {
@@ -284,27 +303,27 @@ export default function App() {
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div className="flex h-screen bg-slate-50 font-sans text-slate-900">
+    <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
       {/* Hidden canvas dùng để capture frame */}
       <canvas ref={canvasRef} className="hidden" />
 
       {/* ── Sidebar ── */}
       <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
         <div className="p-5 flex items-center gap-3 border-b border-slate-100">
-          <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-sm">
-            <Car size={20} />
+          <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-100">
+            <Car size={22} strokeWidth={2.5} />
           </div>
           <div>
-            <h1 className="font-bold text-base tracking-tight">SmartPark</h1>
-            <p className="text-[11px] text-slate-500 font-medium">ALPR System v2.0</p>
+            <h1 className="font-bold text-lg tracking-tight text-slate-800">SmartPark</h1>
+            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Hệ thống AI v2.1</p>
           </div>
         </div>
 
-        <nav className="flex-1 p-4 space-y-1">
-          <NavItem icon={<LayoutDashboard size={18} />} label="Tổng quan" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
-          <NavItem icon={<Activity size={18} />} label="Lịch sử xe" active={activeTab === 'history'} onClick={() => setActiveTab('history')} />
-          <NavItem icon={<Users size={18} />} label="Cư dân" active={activeTab === 'residents'} onClick={() => setActiveTab('residents')} />
-          <NavItem icon={<Settings size={18} />} label="Cài đặt" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
+        <nav className="flex-1 p-4 space-y-1.5">
+          <NavItem icon={<LayoutDashboard size={19} />} label="Hệ Thống" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
+          <NavItem icon={<Activity size={19} />} label="Lịch Sử Ra Vào" active={activeTab === 'history'} onClick={() => setActiveTab('history')} />
+          <NavItem icon={<Users size={19} />} label="Cư Dân" active={activeTab === 'residents'} onClick={() => setActiveTab('residents')} />
+          <NavItem icon={<Settings size={19} />} label="Cài Đặt" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
         </nav>
 
         {/* API Status */}
@@ -345,175 +364,179 @@ export default function App() {
 
         <div className="flex-1 overflow-auto p-6">
 
-          {/* ══════════ DASHBOARD ══════════ */}
+          {/* ══════════ DASHBOARD (HỆ THỐNG) ══════════ */}
           {activeTab === 'dashboard' && (
-            <>
-              {/* Stats */}
-              <div className="grid grid-cols-4 gap-4 mb-6">
-                <StatCard title="Xe trong bãi" value={stats.inside} icon={<Car size={20} className="text-indigo-600" />} color="indigo" />
-                <StatCard title="Lượt vào hôm nay" value={stats.entries_today} icon={<LogIn size={20} className="text-emerald-600" />} color="emerald" />
-                <StatCard title="Lượt ra hôm nay" value={stats.exits_today} icon={<LogOut size={20} className="text-orange-600" />} color="orange" />
-                <StatCard title="Xe lạ hôm nay" value={stats.strangers_today} icon={<AlertTriangle size={20} className="text-red-500" />} color="red" />
+            <div className="flex flex-col h-full gap-6">
+              {/* Stats Bar */}
+              <div className="grid grid-cols-4 gap-5">
+                <StatCard 
+                    title="Chỗ đỗ khả dụng" 
+                    value={`${stats.inside} / 50`} 
+                    icon={<Car size={22} className="text-indigo-600" />} 
+                    color="indigo" 
+                    subValue={stats.inside >= 50 ? "ĐÃ ĐẦY" : "Còn trống"}
+                />
+                <StatCard title="Vào hôm nay" value={stats.entries_today} icon={<LogIn size={22} className="text-emerald-600" />} color="emerald" />
+                <StatCard title="Ra hôm nay" value={stats.exits_today} icon={<LogOut size={22} className="text-orange-600" />} color="orange" />
+                <StatCard title="Xe lạ/Từ chối" value={stats.strangers_today} icon={<AlertTriangle size={22} className="text-red-500" />} color="red" />
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* Camera */}
-                <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-                  <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
-                    <h3 className="font-semibold text-slate-800 flex items-center gap-2 text-sm">
-                      <Video size={16} className="text-slate-500" />
-                      Camera {cameraMode === 'esp32' ? 'ESP32-CAM (IP)' : 'Cổng Chính (Webcam)'}
+              <div className="flex-1 grid grid-cols-12 gap-6 min-h-0">
+                {/* Lịch sử Ra Vào (TO HƠN) */}
+                <div className="col-span-12 lg:col-span-8 bg-white rounded-3xl border border-slate-200 shadow-sm flex flex-col min-h-0">
+                  <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                    <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                      <Clock size={18} className="text-indigo-500" />
+                      Lịch sử Hoạt động
                     </h3>
-                    <div className="flex items-center gap-2">
-                      <div className="flex bg-slate-100 p-0.5 rounded-lg mr-2">
-                        <button
-                          onClick={() => setCameraMode('webcam')}
-                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-all ${cameraMode === 'webcam' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                          WEBCAM
-                        </button>
-                        <button
-                          onClick={() => setCameraMode('esp32')}
-                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-all ${cameraMode === 'esp32' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                          ESP32
-                        </button>
-                      </div>
-                      {isProcessing && (
-                        <span className="text-xs text-indigo-600 font-medium flex items-center gap-1">
-                          <RefreshCw size={12} className="animate-spin" />
-                          Đang nhận diện...
-                        </span>
-                      )}
-                      {cameraMode === 'esp32' && (
-                        <div className="flex items-center gap-1">
-                          <input 
-                            type="text" 
-                            value={cameraIp}
-                            onChange={(e) => setCameraIp(e.target.value)}
-                            className="text-[10px] w-20 px-1 py-0.5 rounded border border-slate-200 outline-none focus:border-indigo-400"
-                            placeholder="IP Camera"
-                          />
-                          <button 
-                            onClick={async () => {
-                              setIsUpdatingIp(true);
-                              try {
-                                const res = await apiFetch<any>('/config/camera_ip', { 
-                                  method: 'POST', 
-                                  body: JSON.stringify({ ip: cameraIp }) 
-                                });
-                                if (res.success) alert("Đã cập nhật IP!");
-                              } catch (e) {
-                                alert("Lỗi kết nối");
-                              } finally {
-                                setIsUpdatingIp(false);
-                              }
-                            }}
-                            disabled={isUpdatingIp}
-                            className="bg-indigo-600 text-white text-[10px] px-2 py-0.5 rounded font-bold hover:bg-indigo-700 disabled:opacity-50"
-                          >
-                            SET
-                          </button>
-                          <button
-                            onClick={() => setLowLatency(!lowLatency)}
-                            className={`text-[10px] px-2 py-0.5 rounded-full font-bold transition-all ${
-                              lowLatency
-                                ? 'bg-amber-100 text-amber-700 border border-amber-200'
-                                : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                            }`}
-                          >
-                            {lowLatency ? '⚡ LIVE' : '⚡ ?'}
-                          </button>
-                        </div>
-                      )}
-                      <span className="relative flex h-2.5 w-2.5">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                    <div className="text-xs font-semibold text-slate-400 bg-slate-50 px-3 py-1 rounded-full uppercase tracking-widest">
+                      Thời gian thực
+                    </div>
+                  </div>
+                  <div className="flex-1 overflow-y-auto min-h-0">
+                    <table className="w-full text-left border-collapse">
+                      <thead className="sticky top-0 bg-white/95 backdrop-blur-md z-10">
+                        <tr className="text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-50">
+                          <th className="px-6 py-3">Biển số</th>
+                          <th className="px-6 py-3">Chủ xe</th>
+                          <th className="px-6 py-3">Trạng thái</th>
+                          <th className="px-6 py-3">Thời điểm</th>
+                          <th className="px-6 py-3 text-right">Ảnh</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-50">
+                        {logs.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="py-20 text-center text-slate-400 text-sm italic">
+                              Chưa có dữ liệu hôm nay
+                            </td>
+                          </tr>
+                        ) : logs.slice(0, 20).map(log => (
+                          <tr key={log.id} className="hover:bg-slate-50/80 transition-all group">
+                            <td className="px-6 py-4">
+                              <span className="font-mono font-bold text-sm bg-slate-900 text-white px-2 py-1 rounded shadow-sm">
+                                {log.bien_so_xe}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 text-sm font-medium text-slate-600">
+                              {residents.find(r => r.bien_so_xe === log.bien_so_xe)?.ten_chu_xe || "Khách"}
+                            </td>
+                            <td className="px-6 py-4">
+                              <TrangThaiTag trang_thai={log.trang_thai} />
+                            </td>
+                            <td className="px-6 py-4 text-xs font-semibold text-slate-400">
+                              {new Date(log.thoi_gian).toLocaleTimeString('vi-VN')}
+                            </td>
+                            <td className="px-6 py-4 text-right">
+                              {log.hinh_anh && (
+                                <img src={`data:image/jpeg;base64,${log.hinh_anh}`} className="inline-block w-12 h-8 object-cover rounded shadow-sm border border-slate-200 group-hover:scale-150 transition-transform origin-right z-20 relative" />
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Camera & So Sánh (NHỎ LẠI) */}
+                <div className="col-span-12 lg:col-span-4 flex flex-col gap-6 min-h-0">
+                  {/* Camera Live */}
+                  <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                    <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+                      <h3 className="font-bold text-xs text-slate-800 flex items-center gap-2">
+                        <Video size={14} className="text-red-500 animate-pulse" />
+                        TRỰC TIẾP
+                      </h3>
+                      <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">
+                        {cameraMode.toUpperCase()}
                       </span>
-                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Live</span>
+                    </div>
+                    <div className="aspect-video bg-black relative">
+                      <img
+                        src={lowLatency ? `http://${cameraIp}:81/stream` : "/api/video_feed"}
+                        className="w-full h-full object-cover"
+                        alt="Live"
+                      />
+                      <div className="absolute inset-0 border-2 border-white/10 pointer-events-none" />
                     </div>
                   </div>
 
-                  <div className="relative bg-slate-900 flex-1 min-h-[380px]">
-                    {cameraMode === 'webcam' ? (
-                      <video
-                        ref={videoRef}
-                        autoPlay
-                        playsInline
-                        muted
-                        className="absolute inset-0 w-full h-full object-cover"
-                      />
-                    ) : (
-                      <img
-                        src={lowLatency ? `http://${cameraIp}:81/stream` : "/api/video_feed"}
-                        className="absolute inset-0 w-full h-full object-contain bg-black"
-                        alt="ESP32 Stream"
-                        onError={(e) => {
-                          if (lowLatency) {
-                            console.warn("Direct stream failed, falling back to proxy...");
-                            setLowLatency(false);
-                          } else {
-                            (e.target as HTMLImageElement).src = 'https://placehold.co/640x480?text=Camera+Offline';
-                          }
-                        }}
-                      />
-                    )}
-
-                    {/* Bounding box overlay khi detect được */}
-                    {latestDetection?.detected && latestDetection.bbox && (
-                      <BBoxOverlay detection={latestDetection} videoRef={videoRef} isIPCam={cameraMode === 'esp32'} />
-                    )}
+                  {/* So Sánh Đối Chiếu */}
+                  <div className="flex-1 bg-white rounded-3xl border border-slate-200 shadow-sm flex flex-col min-h-0 overflow-hidden">
+                    <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between bg-indigo-50/30">
+                      <h3 className="font-bold text-xs text-indigo-800 flex items-center gap-2 uppercase tracking-wider">
+                        <Shield size={14} /> Đối Chiếu AI
+                      </h3>
+                      {latestDetection?.gate && (
+                        <span className="text-[10px] font-bold text-indigo-600 border border-indigo-200 px-2 py-0.5 rounded-md">
+                          CỔNG {latestDetection.gate.toUpperCase()}
+                        </span>
+                      )}
+                    </div>
                     
-                    {/* Status overlay góc dưới */}
-                    {latestDetection?.processed && (
-                      <div className={`absolute bottom-3 left-3 right-3 px-4 py-2.5 rounded-xl backdrop-blur-sm text-white text-sm font-semibold flex items-center gap-3 ${
-                        latestDetection.is_resident
-                          ? 'bg-emerald-600/85'
-                          : 'bg-red-600/85'
-                      }`}>
-                        {latestDetection.is_resident ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
-                        <div className="flex-1">
-                          <div className="font-bold font-mono">{latestDetection.matched_plate || latestDetection.plate}</div>
-                          <div className="text-xs opacity-90">
-                            {latestDetection.is_resident
-                              ? `✅ ${latestDetection.owner} — ${latestDetection.trang_thai === 'Vao' ? 'Vào bãi' : 'Ra bãi'}${latestDetection.barrier_opened ? ' · Barrier mở' : ''}`
-                              : '⚠️ Xe lạ — Từ chối'}
+                    <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
+                      {latestDetection ? (
+                        <>
+                          <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-2xl border border-slate-100">
+                             <div className="flex-1">
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Biển số phát hiện</p>
+                                <p className="text-xl font-black text-slate-900 font-mono">{latestDetection.plate}</p>
+                             </div>
+                             <div className="text-right">
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Độ tin cậy</p>
+                                <p className="text-sm font-bold text-indigo-600">{(latestDetection.confidence! * 100).toFixed(1)}%</p>
+                             </div>
                           </div>
-                        </div>
-                        <div className="text-xs opacity-70">
-                          {(latestDetection.confidence! * 100).toFixed(0)}%
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
 
-                {/* Recent logs */}
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col max-h-[500px]">
-                  <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
-                    <h3 className="font-semibold text-sm text-slate-800 flex items-center gap-2">
-                      <Clock size={15} className="text-slate-500" />
-                      Hoạt động gần đây
-                    </h3>
-                    <button onClick={() => setActiveTab('history')} className="text-xs text-indigo-600 font-semibold hover:underline">
-                      Xem tất cả
-                    </button>
-                  </div>
-                  <div className="flex-1 overflow-y-auto divide-y divide-slate-50">
-                    {logs.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center h-40 text-slate-400">
-                        <Activity size={28} className="mb-2 opacity-40" />
-                        <p className="text-xs">Chưa có dữ liệu</p>
-                      </div>
-                    ) : logs.slice(0, 15).map(log => (
-                      <React.Fragment key={log.id}>
-                        <LogRow log={log} />
-                      </React.Fragment>
-                    ))}
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                              <p className="text-[10px] font-bold text-slate-500 text-center uppercase">Lúc Vào Bãi</p>
+                              <div className="aspect-[4/3] bg-slate-100 rounded-xl overflow-hidden border border-slate-200 flex items-center justify-center">
+                                {latestDetection.entry_image ? (
+                                  <img src={latestDetection.entry_image} className="w-full h-full object-cover" />
+                                ) : (
+                                  <Activity size={24} className="text-slate-300" />
+                                )}
+                              </div>
+                            </div>
+                            <div className="space-y-1.5">
+                              <p className="text-[10px] font-bold text-slate-500 text-center uppercase">Hiện Tại</p>
+                              <div className="aspect-[4/3] bg-slate-100 rounded-xl overflow-hidden border-indigo-500 border-2 flex items-center justify-center">
+                                {latestDetection.image ? (
+                                  <img src={latestDetection.image} className="w-full h-full object-cover" />
+                                ) : (
+                                  <Camera size={24} className="text-slate-300" />
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className={`p-3 rounded-2xl border animate-in fade-in slide-in-from-bottom-2 duration-500 ${
+                            latestDetection.is_resident ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100'
+                          }`}>
+                            <div className="flex items-center gap-2 mb-1">
+                               {latestDetection.is_resident ? <CheckCircle2 size={16} className="text-emerald-600" /> : <AlertTriangle size={16} className="text-red-600" />}
+                               <span className={`text-xs font-bold uppercase ${latestDetection.is_resident ? 'text-emerald-700' : 'text-red-700'}`}>
+                                 {latestDetection.is_resident ? 'Cư Dân Hợp Lệ' : 'Khách Lạ / Từ Chối'}
+                               </span>
+                            </div>
+                            <p className="text-sm font-medium text-slate-700">
+                               {latestDetection.is_resident ? `Chào mừng ${latestDetection.owner}! Hệ thống đã mở Barrier.` : `Cảnh báo: Phát hiện xe không thuộc danh sách cư dân.`}
+                            </p>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="flex-1 flex flex-col items-center justify-center text-slate-300 gap-2 opacity-50">
+                          <Cpu size={48} strokeWidth={1} />
+                          <p className="text-xs font-bold uppercase tracking-widest">Đang chờ tín hiệu...</p>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
-            </>
+            </div>
           )}
 
           {/* ══════════ HISTORY ══════════ */}
@@ -631,48 +654,54 @@ export default function App() {
               </div>
 
               {/* List */}
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-                  <h3 className="font-semibold text-sm text-slate-800 flex items-center gap-2">
-                    <Shield size={15} className="text-slate-500" />
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden flex-1 flex flex-col min-h-0">
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <Shield size={18} className="text-slate-500" />
                     Danh sách cư dân ({residents.length})
                   </h3>
-                  <button onClick={loadResidents} className="text-xs text-indigo-600 font-semibold hover:underline">Làm mới</button>
+                  <button onClick={loadResidents} className="text-xs text-indigo-600 font-bold hover:underline px-3 py-1 bg-white border border-slate-200 rounded-lg shadow-sm">
+                    Làm mới
+                  </button>
                 </div>
-                <table className="w-full text-sm">
-                  <thead className="border-b border-slate-100">
-                    <tr className="text-slate-400 text-xs uppercase tracking-wider">
-                      <th className="px-5 py-3 text-left font-medium">Biển số</th>
-                      <th className="px-5 py-3 text-left font-medium">Chủ xe</th>
-                      <th className="px-5 py-3 text-left font-medium">Căn hộ</th>
-                      <th className="px-5 py-3 text-right font-medium">Hành động</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {residents.map(r => (
-                      <tr key={r.id} className="hover:bg-slate-50 transition-colors">
-                        <td className="px-5 py-3 font-mono font-bold text-slate-900">{r.bien_so_xe}</td>
-                        <td className="px-5 py-3 text-slate-700 font-medium">{r.ten_chu_xe}</td>
-                        <td className="px-5 py-3 text-slate-500">{r.so_can_ho || '—'}</td>
-                        <td className="px-5 py-3 text-right">
-                          <button
-                            onClick={() => handleDeleteResident(r.id)}
-                            className="text-red-500 hover:text-red-700 hover:bg-red-50 p-1.5 rounded-lg transition-colors"
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </td>
+                <div className="flex-1 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead className="border-b border-slate-100 sticky top-0 bg-white/95 backdrop-blur-md">
+                      <tr className="text-slate-400 text-[10px] uppercase tracking-widest font-bold">
+                        <th className="px-6 py-3 text-left">Biển số</th>
+                        <th className="px-6 py-3 text-left">Chủ xe</th>
+                        <th className="px-6 py-3 text-left">Căn hộ</th>
+                        <th className="px-6 py-3 text-right">Hành động</th>
                       </tr>
-                    ))}
-                    {residents.length === 0 && (
-                      <tr>
-                        <td colSpan={4} className="text-center py-10 text-slate-400 text-sm">
-                          Chưa có cư dân nào
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {residents.map(r => (
+                        <tr key={r.id} className="hover:bg-slate-50 transition-colors group">
+                          <td className="px-6 py-4 font-mono font-bold text-slate-900">
+                             <span className="bg-slate-100 px-2 py-1 rounded border border-slate-200">{r.bien_so_xe}</span>
+                          </td>
+                          <td className="px-6 py-4 text-slate-700 font-bold">{r.ten_chu_xe}</td>
+                          <td className="px-6 py-4 text-slate-500 font-medium">{r.so_can_ho || '—'}</td>
+                          <td className="px-6 py-4 text-right">
+                            <button
+                              onClick={() => handleDeleteResident(r.id)}
+                              className="text-red-400 hover:text-red-600 hover:bg-red-50 p-2 rounded-xl transition-all"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {residents.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="text-center py-20 text-slate-400 italic">
+                            Chưa có cư dân nào trong hệ thống
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}
@@ -680,50 +709,73 @@ export default function App() {
           {/* ══════════ SETTINGS ══════════ */}
           {activeTab === 'settings' && (
             <div className="max-w-2xl space-y-5">
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center text-indigo-600">
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center gap-4">
+                  <div className="w-10 h-10 rounded-2xl bg-indigo-100 flex items-center justify-center text-indigo-600">
                     <Camera size={20} />
                   </div>
                   <div>
-                    <h3 className="font-bold text-slate-800">Cấu hình Camera</h3>
-                    <p className="text-xs text-slate-500">Webcam máy tính được sử dụng (không cần Arduino)</p>
+                    <h3 className="font-bold text-slate-800">Cấu hình Camera & Hardware</h3>
+                    <p className="text-xs text-slate-500">Thiết lập kết nối với ESP8266 và Arduino</p>
                   </div>
                 </div>
-                <div className="p-5 space-y-4">
+                <div className="p-6 space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">IP Camera ESP32</label>
+                      <input 
+                        type="text" 
+                        value={cameraIp} 
+                        onChange={e => setCameraIp(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">Cổng COM Arduino</label>
+                      <input type="text" defaultValue="COM3" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all" />
+                    </div>
+                  </div>
                   <div>
-                    <label className="block text-sm font-semibold text-slate-700 mb-1.5">Tần suất gửi frame</label>
-                    <select className="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
-                      <option>Mỗi 2 giây (đang dùng)</option>
-                      <option>Mỗi 1 giây</option>
-                      <option>Mỗi 3 giây</option>
-                    </select>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">Chế độ hoạt động</label>
+                    <div className="flex gap-2">
+                        {['esp32', 'webcam'].map(mode => (
+                           <button 
+                             key={mode}
+                             onClick={() => setCameraMode(mode as any)}
+                             className={`flex-1 py-2.5 rounded-xl border text-sm font-bold transition-all ${
+                               cameraMode === mode ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-100' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'
+                             }`}
+                           >
+                             {mode === 'esp32' ? 'Camera IP (Remote)' : 'Webcam (Local)'}
+                           </button>
+                        ))}
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600">
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center gap-4">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-100 flex items-center justify-center text-emerald-600">
                     <Cpu size={20} />
                   </div>
                   <div>
-                    <h3 className="font-bold text-slate-800">Thông tin hệ thống</h3>
-                    <p className="text-xs text-slate-500">FastAPI tại localhost:8000 · PostgreSQL tại localhost:55432</p>
+                    <h3 className="font-bold text-slate-800">Trạng thái Hệ thống</h3>
+                    <p className="text-xs text-slate-500">Thông tin kết nối và dữ liệu AI</p>
                   </div>
                 </div>
-                <div className="p-5 space-y-3 text-sm">
-                  <InfoRow label="Backend" value="FastAPI + Uvicorn (localhost:8000)" />
-                  <InfoRow label="Model YOLO" value="Plate_Detection_v12/weights/best.pt" />
+                <div className="p-6 space-y-3">
+                  <InfoRow label="Backend API" value="Uvicorn (localhost:8000)" />
+                  <InfoRow label="YOLO Model" value="v12_best.pt" />
                   <InfoRow label="OCR Engine" value="EasyOCR (Tiếng Việt)" />
-                  <InfoRow label="Database" value="PostgreSQL :55432 / nhan_dien_bien_so_xe" />
-                  <InfoRow label="Trạng thái API" value={apiStatus === 'online' ? '🟢 Đang kết nối' : '🔴 Mất kết nối'} />
+                  <InfoRow label="Database" value="nhan_dien_bien_so_xe (PostgreSQL)" />
+                  <InfoRow label="GPU" value="RTX 3060 (Đang dùng)" />
                 </div>
               </div>
 
               <div className="flex justify-end">
-                <button className="flex items-center gap-2 bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
-                  <Save size={16} /> Lưu cấu hình
+                <button className="flex items-center gap-2 bg-indigo-600 text-white px-6 py-3 rounded-2xl text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-95">
+                  <Save size={18} /> Lưu cấu hình
                 </button>
               </div>
             </div>
@@ -743,10 +795,10 @@ function NavItem({ icon, label, active = false, onClick }: {
   return (
     <button
       onClick={onClick}
-      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+      className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-bold transition-all duration-300 ${
         active
-          ? 'bg-indigo-50 text-indigo-700 border border-indigo-100 shadow-sm'
-          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 border border-transparent'
+          ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100 translate-x-1'
+          : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800 border border-transparent'
       }`}
     >
       {icon}
@@ -755,20 +807,29 @@ function NavItem({ icon, label, active = false, onClick }: {
   );
 }
 
-function StatCard({ title, value, icon, color }: {
-  title: string; value: number; icon: React.ReactNode; color: string;
+function StatCard({ title, value, icon, color, subValue }: {
+  title: string; value: string | number; icon: React.ReactNode; color: string; subValue?: string;
 }) {
   const bg: Record<string, string> = {
-    indigo: 'bg-indigo-50', emerald: 'bg-emerald-50', orange: 'bg-orange-50', red: 'bg-red-50'
+    indigo: 'bg-indigo-50 text-indigo-600', emerald: 'bg-emerald-50 text-emerald-600', orange: 'bg-orange-50 text-orange-600', red: 'bg-red-50 text-red-600'
   };
   return (
-    <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
-      <div className={`w-12 h-12 rounded-xl ${bg[color] || 'bg-slate-50'} flex items-center justify-center shrink-0`}>
-        {icon}
+    <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm flex flex-col gap-3 group hover:border-indigo-300 transition-all">
+      <div className="flex items-center justify-between">
+        <div className={`w-12 h-12 rounded-2xl ${bg[color] || 'bg-slate-50'} flex items-center justify-center shrink-0 transition-transform group-hover:scale-110`}>
+          {icon}
+        </div>
+        {subValue && (
+            <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-md ${
+                value === "ĐÃ ĐẦY" ? 'bg-red-100 text-red-600' : 'bg-indigo-100 text-indigo-600'
+            }`}>
+                {subValue}
+            </span>
+        )}
       </div>
       <div>
-        <p className="text-xs font-medium text-slate-500 mb-0.5">{title}</p>
-        <h4 className="text-2xl font-bold text-slate-900 tracking-tight">{value}</h4>
+        <h4 className="text-2xl font-black text-slate-800 tracking-tight leading-none">{value}</h4>
+        <p className="text-[11px] font-bold text-slate-400 mt-1 uppercase tracking-wider">{title}</p>
       </div>
     </div>
   );
