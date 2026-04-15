@@ -50,7 +50,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         pass
 
 # ─── Cấu hình ──────────────────────────────────────────────────────────────
-MODEL_PATH = "runs/detect/HeThongBarrier/Plate_Detection_v12/weights/best.pt"
+MODEL_PATH = "yolo26n.pt"
 CHAR_MODEL_PATH = "runs/classify/data/models/char_model/weights/best.pt"
 DB_CONFIG = {
     "host": "localhost",
@@ -59,8 +59,9 @@ DB_CONFIG = {
     "user": "postgres",
     "password": "postgres",
 }
+PARKING_CAPACITY = 50
 COOLDOWN_SECONDS = 5
-CONFIDENCE_THRESHOLD = 0.45
+CONFIDENCE_THRESHOLD = 0.3
 # URLs are now dynamic based on state.camera_ip
 
 
@@ -76,6 +77,8 @@ class AppState:
     camera_ip: str = "172.20.10.2"
     latest_frame: Optional[np.ndarray] = None
     esp32_running: bool = False
+    camera_source: str = "esp32" # "esp32" or "webcam"
+    webcam_index: int = 0
     
     # Serial Port (Arduino)
     ser: Optional[serial.Serial] = None
@@ -93,44 +96,68 @@ state = AppState()
 
 
 # ─── ESP32-CAM Capture Worker ──────────────────────────────────────────────
-def esp32_worker():
-    """Background task to fetch frames from ESP32-CAM"""
-    print(f"[ESP32] Starting capture from http://{state.camera_ip}:81/stream...")
+def camera_worker():
+    """Background task to fetch frames from the selected camera source"""
+    print(f"[CAMERA] Starting camera worker (Source: {state.camera_source})")
     state.esp32_running = True
     
-    # Try MJPEG stream first via OpenCV
-    cap = cv2.VideoCapture(f"http://{state.camera_ip}:81/stream")
-    # Set buffer size to 1 to avoid "frozen" old frames
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap = None
+    last_source = None
     
     while state.esp32_running:
-        if cap.isOpened():
+        # Check if source changed
+        if state.camera_source != last_source:
+            if cap is not None:
+                cap.release()
+                cap = None
+            
+            if state.camera_source == "esp32":
+                url = f"http://{state.camera_ip}:81/stream"
+                print(f"[CAMERA] Connecting to ESP32: {url}")
+                cap = cv2.VideoCapture(url)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            else:
+                print(f"[CAMERA] Connecting to Local Webcam (Index: {state.webcam_index})")
+                # Use DSHOW on Windows for faster startup if possible
+                cap = cv2.VideoCapture(state.webcam_index, cv2.CAP_DSHOW)
+                if not cap.isOpened():
+                    cap = cv2.VideoCapture(state.webcam_index)
+            
+            last_source = state.camera_source
+
+        if cap is not None and cap.isOpened():
             ret, frame = cap.read()
             if ret:
                 state.latest_frame = frame
-                # Very short sleep to allow maximum throughput
-                time.sleep(0.005)
+                # Short sleep to prevent CPU hogging
+                time.sleep(0.01)
             else:
-                # Try fallback if stream fails
-                try:
-                    resp = requests.get(f"http://{state.camera_ip}/capture", timeout=1.0)
-                    if resp.status_code == 200:
-                        nparr = np.frombuffer(resp.content, np.uint8)
-                        decoded = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        if decoded is not None:
-                            state.latest_frame = decoded
-                    time.sleep(0.05)
-                except Exception:
-                    print(f"[ESP32] Stream read failed. Retrying in 2s...")
+                if state.camera_source == "esp32":
+                    # Fallback for ESP32 capture if stream hangs
+                    try:
+                        resp = requests.get(f"http://{state.camera_ip}/capture", timeout=1.0)
+                        if resp.status_code == 200:
+                            nparr = np.frombuffer(resp.content, np.uint8)
+                            decoded = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            if decoded is not None:
+                                state.latest_frame = decoded
+                        time.sleep(0.05)
+                    except Exception:
+                        print(f"[CAMERA] ESP32 read failed. Retrying in 2s...")
+                        cap.release()
+                        time.sleep(2.0)
+                        cap = cv2.VideoCapture(f"http://{state.camera_ip}:81/stream")
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                else:
+                    print(f"[CAMERA] Webcam read failed. Retrying in 2s...")
                     cap.release()
                     time.sleep(2.0)
-                    cap = cv2.VideoCapture(f"http://{state.camera_ip}:81/stream")
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cap = cv2.VideoCapture(state.webcam_index, cv2.CAP_DSHOW)
         else:
-            # Re-open stream
-            cap = cv2.VideoCapture(ESP32_CAM_URL)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            time.sleep(2)
+            time.sleep(1.0)
+    
+    if cap is not None:
+        cap.release()
 
 
 # ─── Lifespan: khởi tạo model khi startup ──────────────────────────────────
@@ -187,7 +214,7 @@ async def lifespan(app: FastAPI):
     print("  📋 Swagger UI: http://localhost:8000/docs\n")
     
     # Start Workers
-    threading.Thread(target=esp32_worker, daemon=True).start()
+    threading.Thread(target=camera_worker, daemon=True).start()
     threading.Thread(target=detect_worker, daemon=True).start() # Auto-pilot detection
     
     yield
@@ -273,6 +300,39 @@ def insert_history(plate: str, trang_thai: str, img_base64: Optional[str] = None
                 conn.commit()
     except Exception as e:
         print(f"[DB] insert_history error: {e}")
+
+def get_current_parking_count() -> int:
+    """Đếm số lượng xe hiện đang có trong bãi (có 'Vào' gần nhất mà chưa có 'Ra')"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # Logic đơn giản: đếm các xe có trạng thái cuối cùng là 'Vao'
+                cur.execute("""
+                    WITH last_status AS (
+                        SELECT bien_so_xe, trang_thai,
+                        ROW_NUMBER() OVER(PARTITION BY bien_so_xe ORDER BY thoi_gian DESC) as rn
+                        FROM lichsuravao
+                    )
+                    SELECT COUNT(*) as count FROM last_status WHERE rn = 1 AND trang_thai = 'Vao'
+                """)
+                return cur.fetchone()['count']
+    except Exception:
+        return 0
+
+def get_entry_image(plate: str) -> Optional[str]:
+    """Lấy ảnh lúc xe vào gần nhất cho một biển số"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT anh_bien_so FROM lichsuravao 
+                    WHERE bien_so_xe = %s AND trang_thai = 'Vao'
+                    ORDER BY thoi_gian DESC LIMIT 1
+                """, (normalize_plate(plate),))
+                row = cur.fetchone()
+                return row['anh_bien_so'] if row else None
+    except Exception:
+        return None
 
 
 def open_arduino(com_port: str = "COM3", baud: int = 9600) -> bool:
@@ -475,8 +535,11 @@ def detect_worker():
         try:
             results = state.yolo_model(frame, verbose=False, conf=CONFIDENCE_THRESHOLD)
             if not results or len(results[0].boxes) == 0:
+                # print(f"[AI-DEBUG] No boxes found at {now}") # Silent log
                 state.last_process_time = now
                 continue
+            
+            print(f"[AI-DEBUG] Found {len(results[0].boxes)} box(es)!")
                 
             # 2. Xử lý kết quả
             box = results[0].boxes[0]
@@ -665,10 +728,65 @@ async def detect_current(demo_mode: bool = Form(True)):
     try:
         result = process_frame_core(state.latest_frame, demo_mode=demo_mode)
         if result.get("processed"):
-            await broadcast({"type": "detection", "data": result})
+            # Localize result
+            await broadcast_detection(result)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/trigger", tags=["Hardware"])
+async def hardware_trigger(gate: str = "in"):
+    """
+    Endpoint gọi bởi ESP8266 khi cảm biến siêu âm phát hiện xe.
+    gate: 'in' (cổng vào) hoặc 'out' (cổng ra)
+    """
+    if state.latest_frame is None:
+        return {"action": "deny", "reason": "Camera chưa sẵn sàng"}
+
+    # 1. Kiểm tra chỗ trống nếu là cổng vào
+    occupied = get_current_parking_count()
+    if gate == "in" and occupied >= PARKING_CAPACITY:
+        return {"action": "deny", "reason": "Bãi xe đã đầy"}
+
+    # 2. Xử lý AI
+    # Chụp frame hiện tại
+    frame = state.latest_frame.copy()
+    result = process_frame_core(frame)
+
+    if not result.get("processed"):
+        return {"action": "deny", "reason": result.get("reason", "Không nhận diện được biển số")}
+
+    plate = result.get("plate")
+    is_resident = result.get("is_resident", False)
+    
+    # 3. Logic mở Barrier
+    action = "deny"
+    if is_resident:
+        action = "open"
+        open_barrier()
+    
+    # 4. Gửi dữ liệu so sánh cho frontend nếu là cổng ra
+    comparison_image = None
+    if gate == "out":
+        comparison_image = get_entry_image(plate)
+        if comparison_image:
+            result["entry_image"] = f"data:image/jpeg;base64,{comparison_image}"
+
+    # Cập nhật kết quả với thông tin bãi xe
+    result["gate"] = "Vào" if gate == "in" else "Ra"
+    result["occupied"] = occupied + (1 if gate == "in" and action == "open" else -1 if gate == "out" and action == "open" else 0)
+    result["capacity"] = PARKING_CAPACITY
+    
+    # Broadcast qua WebSocket
+    await broadcast_detection(result)
+
+    return {
+        "action": action,
+        "plate": plate,
+        "owner": result.get("owner"),
+        "reason": "Thành công" if action == "open" else "Không phải cư dân"
+    }
 
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
@@ -697,7 +815,7 @@ async def get_logs(limit: int = 50, status: str = "all", date: str = "all"):
                 where = "WHERE " + " AND ".join(conditions) if conditions else ""
                 cur.execute(
                     f"""
-                    SELECT id, bien_so_xe, thoi_gian, trang_thai, hinh_anh
+                    SELECT id, bien_so_xe, thoi_gian, trang_thai, anh_bien_so as hinh_anh
                     FROM lichsuravao
                     {where}
                     ORDER BY thoi_gian DESC
@@ -849,6 +967,20 @@ async def set_camera_ip(body: ConfigIP):
     state.camera_ip = body.ip
     print(f"[CONFIG] Đã cập nhật ESP32 IP thành: {state.camera_ip}")
     return {"success": True, "message": f"Đã cập nhật IP: {state.camera_ip}"}
+
+
+class ConfigSource(BaseModel):
+    source: str # "esp32" or "webcam"
+
+@app.post("/api/config/camera_source", tags=["Config"])
+async def set_camera_source(body: ConfigSource):
+    """Cập nhật nguồn Camera (ESP32 hoặc Webcam)"""
+    if body.source not in ["esp32", "webcam"]:
+        raise HTTPException(status_code=400, detail="Nguồn camera không hợp lệ")
+    
+    state.camera_source = body.source
+    print(f"[CONFIG] Đã cập nhật nguồn camera thành: {state.camera_source}")
+    return {"success": True, "message": f"Đã chuyển sang: {state.camera_source}"}
 
 
 # ─── Chạy server ───────────────────────────────────────────────────────────

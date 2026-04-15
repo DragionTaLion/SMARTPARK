@@ -16,7 +16,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # Khởi động FastAPI server trong background
 Write-Host "[1/2] Khoi dong FastAPI Backend (localhost:8000)..." -ForegroundColor Green
-$backend = Start-Process -FilePath "py" -ArgumentList "api_server.py" -PassThru -NoNewWindow
+$backend = Start-Process -FilePath ".\.venv\Scripts\python.exe" -ArgumentList "api_server.py" -PassThru -NoNewWindow
 Write-Host "      PID: $($backend.Id)" -ForegroundColor DarkGray
 
 # Đợi server sẵn sàng
