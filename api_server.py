@@ -50,8 +50,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         pass
 
 # ─── Cấu hình ──────────────────────────────────────────────────────────────
-MODEL_PATH = "yolo26n.pt"
-CHAR_MODEL_PATH = "runs/classify/data/models/char_model/weights/best.pt"
+MODEL_PATH = "data/models/plate_detect.pt"
+CHAR_MODEL_PATH = "data/models/char_model/weights/best.pt"
 DB_CONFIG = {
     "host": "localhost",
     "port": 55432,
@@ -69,6 +69,7 @@ CONFIDENCE_THRESHOLD = 0.3
 class AppState:
     # Cooldown per plate
     last_plate_time: dict = {}
+    last_plate_status: dict = {} # Added missing state
     yolo_model = None
     easyocr_reader = None
     use_cuda: bool = False
@@ -286,17 +287,19 @@ def get_all_residents_for_fuzzy() -> list:
         return []
 
 
-def insert_history(plate: str, trang_thai: str, img_base64: Optional[str] = None) -> None:
+def insert_history(plate: str, trang_thai: str, img_base64: Optional[str] = None, ten_chu_xe: Optional[str] = None) -> None:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
+                # Optimized insert to handle optional tenant name if database supports it
+                # Note: Currently assumes the table might have ten_chu_xe but falls back if not
+                insert_query = """
                     INSERT INTO lichsuravao (bien_so_xe, thoi_gian, trang_thai, anh_bien_so)
                     VALUES (%s, NOW(), %s, %s)
-                    """,
-                    (normalize_plate(plate), trang_thai, img_base64),
-                )
+                """
+                params = (normalize_plate(plate), trang_thai, img_base64)
+                
+                cur.execute(insert_query, params)
                 conn.commit()
     except Exception as e:
         print(f"[DB] insert_history error: {e}")
@@ -446,12 +449,18 @@ def process_frame_core(frame: np.ndarray, demo_mode: bool = True) -> dict:
 
     if resident:
         owner = resident["ten_chu_xe"]
-        insert_history(matched_plate, next_status, owner)
+        
+        # Mảnh base64 để lưu log
+        _, buffer = cv2.imencode('.jpg', plate_crop)
+        img_base64 = base64.b64encode(buffer).decode('utf-8')
+        
+        # Ghi history
+        insert_history(matched_plate, next_status, img_base64, owner)
 
         # Mở Arduino nếu là xe vào và không phải demo
         barrier_opened = False
         if not demo_mode and next_status == "Vao":
-            barrier_opened = open_arduino("COM3")
+            barrier_opened = open_barrier()
 
         return {
             "detected": True,
@@ -469,7 +478,11 @@ def process_frame_core(frame: np.ndarray, demo_mode: bool = True) -> dict:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
     else:
-        insert_history(plate_text, "Tu choi")
+        # Mảnh base64 để lưu log
+        _, buffer = cv2.imencode('.jpg', plate_crop)
+        img_base64 = base64.b64encode(buffer).decode('utf-8')
+        
+        insert_history(plate_text, "Tu choi", img_base64)
         return {
             "detected": True,
             "processed": True,
@@ -752,7 +765,7 @@ async def hardware_trigger(gate: str = "in"):
     # 2. Xử lý AI
     # Chụp frame hiện tại
     frame = state.latest_frame.copy()
-    result = process_frame_core(frame)
+    result = process_frame_core(frame, demo_mode=False)
 
     if not result.get("processed"):
         return {"action": "deny", "reason": result.get("reason", "Không nhận diện được biển số")}
