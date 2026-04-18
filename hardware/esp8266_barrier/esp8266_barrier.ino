@@ -9,7 +9,7 @@ const char* password = "phongtro284";
 
 // ================= CẤU HÌNH SERVER =================
 // Địa chỉ IP máy tính đã chạy api_server.py
-const char* serverUrl = "http://192.168.2.34:8000/api/trigger?gate=in";
+const char* serverUrl = "http://192.168.50.38:8000/api/trigger?gate=in";
 
 // ================= CẤU HÌNH CHÂN (PINS) =================
 const int trigPin = D1;  // GPIO 5

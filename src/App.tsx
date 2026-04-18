@@ -3,8 +3,10 @@ import {
   Car, LogIn, LogOut, Activity, LayoutDashboard, Settings,
   Bell, Search, CheckCircle2, Clock, Video, Download,
   Camera, Cpu, Save, Filter, XCircle, Users, AlertTriangle,
-  Wifi, WifiOff, RefreshCw, Plus, Trash2, Shield
+  Wifi, WifiOff, RefreshCw, Plus, Trash2, Shield,
+  Gamepad2, Info, Server, Database, Edit, LayoutGrid
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 type LogEntry = {
@@ -39,9 +41,14 @@ type DetectionResult = {
   error?: string;
   reason?: string;
   entry_image?: string; // Ảnh lúc vào để so sánh
-  occupied?: number;
-  capacity?: number;
-  gate?: string;
+  gate_id?: number;
+  gate_name?: string;
+};
+
+type ParkingSlot = {
+  slot_id: number;
+  slot_name: string;
+  status: boolean; // true: occupied, false: free
 };
 
 type Resident = {
@@ -49,6 +56,7 @@ type Resident = {
   bien_so_xe: string;
   ten_chu_xe: string;
   so_can_ho: string;
+  anh_dang_ky?: string;
 };
 
 // ─── API Base URL (thông qua Vite proxy) ────────────────────────────────────
@@ -77,13 +85,21 @@ export default function App() {
   const [logFilter, setLogFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   // New resident form
-  const [newResident, setNewResident] = useState({ bien_so_xe: '', ten_chu_xe: '', so_can_ho: '' });
+  const [newResident, setNewResident] = useState({ id: null as number | null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', anh_dang_ky: '' });
   const [addingResident, setAddingResident] = useState(false);
+  const [scanningForRegistration, setScanningForRegistration] = useState(false);
   const [addError, setAddError] = useState('');
   const [cameraMode, setCameraMode] = useState<'webcam' | 'esp32'>('esp32');
-  const [lowLatency, setLowLatency] = useState(false);
-  const [cameraIp, setCameraIp] = useState('172.20.10.2');
-  const [isUpdatingIp, setIsUpdatingIp] = useState(false);
+  const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.1.10');
+  const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.1.11');
+  const [sensorStates, setSensorStates] = useState<number[]>([0, 0, 0, 0, 0]);
+  const [parkingSlots, setParkingSlots] = useState<ParkingSlot[]>([
+    { slot_id: 1, slot_name: 'Ô số 1', status: false },
+    { slot_id: 2, slot_name: 'Ô số 2', status: false },
+    { slot_id: 3, slot_name: 'Ô số 3', status: false },
+  ]);
+  const [lastDetections, setLastDetections] = useState<Record<number, DetectionResult>>({});
+  const [isUpdatingConfig, setIsUpdatingConfig] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -138,14 +154,23 @@ export default function App() {
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
-        // Backend expert worker sends data directly
-        if (msg.detected && msg.processed) {
+        
+        // 1. Nhận diện biển số
+        if (msg.processed && msg.gate_id) {
+          setLastDetections(prev => ({ ...prev, [msg.gate_id]: msg }));
           setLatestDetection(msg);
           loadLogs();
           loadStats();
-          
-          // Toast or Notification logic can go here
-          console.log("Push Detection:", msg.plate);
+        }
+        
+        // 2. Trạng thái cảm biến & Ô đỗ (Từ Hardware API broadcast)
+        if (msg.type === 'hardware_update') {
+          setSensorStates(msg.sensors);
+          // Cập nhật parking slots dựa trên bit cảm biến 3, 4, 5 (index 2,3,4)
+          setParkingSlots(prev => prev.map((slot, idx) => ({
+            ...slot,
+            status: !!msg.sensors[idx + 2]
+          })));
         }
       } catch (err) {
         console.warn("WS Message error:", err);
@@ -155,7 +180,7 @@ export default function App() {
     ws.onclose = () => setTimeout(setupWebSocket, 3000);
     ws.onerror = () => setApiStatus('offline');
     wsRef.current = ws;
-  }, [loadStats]);
+  }, [loadStats, loadLogs]);
 
   // ── Camera setup ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -242,7 +267,42 @@ export default function App() {
     if (activeTab === 'residents') loadResidents();
   }, [activeTab, logFilter, loadLogs, loadResidents]);
 
-  // ── Add resident ──────────────────────────────────────────────────────────
+  const handleManualOpen = async (gateId: number) => {
+    try {
+      await apiFetch(`/hardware/open_manual/${gateId}`, { method: 'POST' });
+      // Thêm log tạm thời để người dùng thấy feedback
+      const newLog: LogEntry = {
+          id: Date.now(),
+          bien_so_xe: 'MANUAL',
+          thoi_gian: new Date().toISOString(),
+          trang_thai: 'Vao',
+          hinh_anh: ''
+      };
+      setLogs(prev => [newLog, ...prev]);
+    } catch (err: any) {
+      console.error("Lỗi mở cổng:", err);
+    }
+  };
+
+  const saveSystemConfig = async () => {
+    setIsUpdatingConfig(true);
+    try {
+      await apiFetch('/config/system', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gate1_ip: gate1Ip, gate2_ip: gate2Ip }),
+      });
+      localStorage.setItem('smartpark_gate1_ip', gate1Ip);
+      localStorage.setItem('smartpark_gate2_ip', gate2Ip);
+      alert("Đã lưu cấu hình Hệ thống V2 thành công!");
+    } catch (err: any) {
+      alert("Lỗi khi lưu cấu hình: " + err.message);
+    } finally {
+      setIsUpdatingConfig(false);
+    }
+  };
+
+
   const handleAddResident = async () => {
     if (!newResident.bien_so_xe || !newResident.ten_chu_xe) {
       setAddError('Biển số và tên chủ xe là bắt buộc');
@@ -251,17 +311,59 @@ export default function App() {
     setAddingResident(true);
     setAddError('');
     try {
-      await apiFetch('/residents', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newResident),
-      });
-      setNewResident({ bien_so_xe: '', ten_chu_xe: '', so_can_ho: '' });
+      if (newResident.id) {
+        // Cập nhật
+        await apiFetch(`/residents/${newResident.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newResident),
+        });
+      } else {
+        // Thêm mới
+        await apiFetch('/residents', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newResident),
+        });
+      }
+      setNewResident({ id: null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', anh_dang_ky: '' });
       loadResidents();
     } catch (e: any) {
       setAddError(e.message);
     } finally {
       setAddingResident(false);
+    }
+  };
+
+  const startEditResident = (r: Resident) => {
+    setNewResident({ 
+      id: r.id, 
+      bien_so_xe: r.bien_so_xe, 
+      ten_chu_xe: r.ten_chu_xe, 
+      so_can_ho: r.so_can_ho,
+      anh_dang_ky: r.anh_dang_ky || '' 
+    });
+    setAddError('');
+  };
+
+  const handleScanResidentPlate = async () => {
+    setScanningForRegistration(true);
+    setAddError('');
+    try {
+      const result: { plate: string, plate_crop: string, detected: boolean } = await apiFetch('/scan_registration');
+      if (result.detected) {
+        setNewResident(prev => ({ 
+          ...prev, 
+          bien_so_xe: result.plate, 
+          anh_dang_ky: result.plate_crop 
+        }));
+      } else {
+        setAddError("Không tìm thấy biển số trong khung hình camera");
+      }
+    } catch (e: any) {
+      setAddError("Lỗi khi quét: " + e.message);
+    } finally {
+      setScanningForRegistration(false);
     }
   };
 
@@ -308,7 +410,7 @@ export default function App() {
       <canvas ref={canvasRef} className="hidden" />
 
       {/* ── Sidebar ── */}
-      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
+      <aside className="w-64 glass-sidebar flex flex-col shrink-0 z-40 relative">
         <div className="p-5 flex items-center gap-3 border-b border-slate-100">
           <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-100">
             <Car size={22} strokeWidth={2.5} />
@@ -319,21 +421,23 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="flex-1 p-4 space-y-1.5">
+        <nav className="flex-1 p-4 space-y-1.5 overflow-y-auto">
           <NavItem icon={<LayoutDashboard size={19} />} label="Hệ Thống" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
           <NavItem icon={<Activity size={19} />} label="Lịch Sử Ra Vào" active={activeTab === 'history'} onClick={() => setActiveTab('history')} />
           <NavItem icon={<Users size={19} />} label="Cư Dân" active={activeTab === 'residents'} onClick={() => setActiveTab('residents')} />
           <NavItem icon={<Settings size={19} />} label="Cài Đặt" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
+          
+          {/* Hardware section removed per user request */}
         </nav>
 
         {/* API Status */}
-        <div className="p-4 border-t border-slate-100">
-          <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${
-            apiStatus === 'online' ? 'bg-emerald-50 text-emerald-700' :
-            apiStatus === 'offline' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'
+        <div className="p-4 border-t border-slate-100 bg-slate-50/30">
+          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] font-bold ${
+            apiStatus === 'online' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
+            apiStatus === 'offline' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-amber-50 text-amber-700 border border-amber-100'
           }`}>
             {apiStatus === 'online' ? <Wifi size={14} /> : apiStatus === 'offline' ? <WifiOff size={14} /> : <RefreshCw size={14} className="animate-spin" />}
-            {apiStatus === 'online' ? 'API: Kết nối' : apiStatus === 'offline' ? 'API: Mất kết nối' : 'Đang kết nối...'}
+            {apiStatus === 'online' ? 'Hệ thống Sẵn sàng' : apiStatus === 'offline' ? 'Mất kết nối Server' : 'Đang kết nối...'}
           </div>
         </div>
       </aside>
@@ -341,7 +445,7 @@ export default function App() {
       {/* ── Main ── */}
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <header className="h-14 bg-white border-b border-slate-200 flex items-center justify-between px-8 shrink-0">
+        <header className="h-14 bg-white/50 backdrop-blur-md border-b border-white/20 flex items-center justify-between px-8 shrink-0 z-30 relative">
           <h2 className="text-lg font-semibold tracking-tight">
             {activeTab === 'dashboard' && 'Giám sát Trực tiếp'}
             {activeTab === 'history' && 'Lịch sử Ra Vào'}
@@ -366,174 +470,136 @@ export default function App() {
 
           {/* ══════════ DASHBOARD (HỆ THỐNG) ══════════ */}
           {activeTab === 'dashboard' && (
-            <div className="flex flex-col h-full gap-6">
-              {/* Stats Bar */}
-              <div className="grid grid-cols-4 gap-5">
-                <StatCard 
-                    title="Chỗ đỗ khả dụng" 
-                    value={`${stats.inside} / 50`} 
-                    icon={<Car size={22} className="text-indigo-600" />} 
-                    color="indigo" 
-                    subValue={stats.inside >= 50 ? "ĐÃ ĐẦY" : "Còn trống"}
-                />
-                <StatCard title="Vào hôm nay" value={stats.entries_today} icon={<LogIn size={22} className="text-emerald-600" />} color="emerald" />
-                <StatCard title="Ra hôm nay" value={stats.exits_today} icon={<LogOut size={22} className="text-orange-600" />} color="orange" />
-                <StatCard title="Xe lạ/Từ chối" value={stats.strangers_today} icon={<AlertTriangle size={22} className="text-red-500" />} color="red" />
+            <div className="flex flex-col gap-6 h-full overflow-y-auto pr-2 custom-scrollbar">
+              
+              {/* V4 ROW 1: TOP STATS BAR */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 shrink-0">
+                <StatCard title="Trong bãi" value={stats.inside} icon={<Car size={22} />} color="indigo" />
+                <StatCard title="Vào hôm nay" value={stats.entries_today} icon={<LogIn size={22} />} color="emerald" />
+                <StatCard title="Ra hôm nay" value={stats.exits_today} icon={<LogOut size={22} />} color="orange" />
+                <StatCard title="Người lạ" value={stats.strangers_today} icon={<AlertTriangle size={22} />} color="red" />
               </div>
 
-              <div className="flex-1 grid grid-cols-12 gap-6 min-h-0">
-                {/* Lịch sử Ra Vào (TO HƠN) */}
-                <div className="col-span-12 lg:col-span-8 bg-white rounded-3xl border border-slate-200 shadow-sm flex flex-col min-h-0">
-                  <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-                    <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                      <Clock size={18} className="text-indigo-500" />
-                      Lịch sử Hoạt động
-                    </h3>
-                    <div className="text-xs font-semibold text-slate-400 bg-slate-50 px-3 py-1 rounded-full uppercase tracking-widest">
-                      Thời gian thực
+              {/* V4 ROW 2: MAIN WORKSPACE (70:30 Split) */}
+              <div className="flex-1 grid grid-cols-10 gap-6 min-h-0">
+                
+                {/* LEFT: DOMINANT ACTIVITY TIMELINE (7/10) */}
+                <div className="col-span-7 bg-white rounded-[2.5rem] border border-slate-200/60 shadow-xl overflow-hidden flex flex-col">
+                  <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-xl font-black text-slate-800 flex items-center gap-3">
+                        <Activity size={24} className="text-indigo-500" /> GIÁM SÁT LỊCH SỬ RA VÀO THỜI GIAN THỰC
+                      </h3>
+                      <p className="text-[11px] font-bold text-slate-400 uppercase tracking-[0.2em] mt-1">Dữ liệu thông minh ghi nhận trực tiếp từ Camera</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-xl border border-emerald-100/50">
+                            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                            <span className="text-[10px] font-black uppercase">Online</span>
+                        </div>
+                        <span className="bg-indigo-600 text-white text-[10px] font-black px-3 py-1.5 rounded-xl shadow-lg shadow-indigo-100 uppercase tracking-widest">Live Feed</span>
                     </div>
                   </div>
-                  <div className="flex-1 overflow-y-auto min-h-0">
-                    <table className="w-full text-left border-collapse">
-                      <thead className="sticky top-0 bg-white/95 backdrop-blur-md z-10">
-                        <tr className="text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-50">
-                          <th className="px-6 py-3">Biển số</th>
-                          <th className="px-6 py-3">Chủ xe</th>
-                          <th className="px-6 py-3">Trạng thái</th>
-                          <th className="px-6 py-3">Thời điểm</th>
-                          <th className="px-6 py-3 text-right">Ảnh</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-50">
-                        {logs.length === 0 ? (
-                          <tr>
-                            <td colSpan={5} className="py-20 text-center text-slate-400 text-sm italic">
-                              Chưa có dữ liệu hôm nay
-                            </td>
-                          </tr>
-                        ) : logs.slice(0, 20).map(log => (
-                          <tr key={log.id} className="hover:bg-slate-50/80 transition-all group">
-                            <td className="px-6 py-4">
-                              <span className="font-mono font-bold text-sm bg-slate-900 text-white px-2 py-1 rounded shadow-sm">
-                                {log.bien_so_xe}
-                              </span>
-                            </td>
-                            <td className="px-6 py-4 text-sm font-medium text-slate-600">
-                              {residents.find(r => r.bien_so_xe === log.bien_so_xe)?.ten_chu_xe || "Khách"}
-                            </td>
-                            <td className="px-6 py-4">
-                              <TrangThaiTag trang_thai={log.trang_thai} />
-                            </td>
-                            <td className="px-6 py-4 text-xs font-semibold text-slate-400">
-                              {new Date(log.thoi_gian).toLocaleTimeString('vi-VN')}
-                            </td>
-                            <td className="px-6 py-4 text-right">
-                              {log.hinh_anh && (
-                                <img src={`data:image/jpeg;base64,${log.hinh_anh}`} className="inline-block w-12 h-8 object-cover rounded shadow-sm border border-slate-200 group-hover:scale-150 transition-transform origin-right z-20 relative" />
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  
+                  <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar bg-slate-50/30">
+                    {logs.length > 0 ? (
+                      logs.slice(0, 15).map((log, index) => (
+                        <motion.div 
+                          key={log.id}
+                          initial={{ opacity: 0, x: -50 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: index * 0.05, type: 'spring', stiffness: 100 }}
+                          className="flex items-center gap-6 p-5 rounded-[2rem] bg-white border border-slate-100 shadow-sm hover:shadow-md hover:border-indigo-200 transition-all cursor-default group"
+                        >
+                          <div className="w-24 h-14 bg-slate-900 rounded-2xl overflow-hidden border-2 border-slate-100 shrink-0 group-hover:border-indigo-200 transition-colors">
+                            <img src={`data:image/jpeg;base64,${log.hinh_anh}`} className="w-full h-full object-cover" alt="Plate" />
+                          </div>
+                          
+                          <div className="flex-1 grid grid-cols-3 gap-4">
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Biển số</p>
+                                <p className="text-xl font-black font-mono text-slate-900">{log.bien_so_xe}</p>
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Trạng thái</p>
+                                <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${
+                                    log.trang_thai === 'Vao' ? 'bg-emerald-100 text-emerald-700' : 
+                                    log.trang_thai === 'Ra' ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700'
+                                }`}>
+                                    {log.trang_thai === 'Vao' ? <LogIn size={12} /> : log.trang_thai === 'Ra' ? <LogOut size={12} /> : <AlertTriangle size={12} />}
+                                    {log.trang_thai === 'Vao' ? 'Đã Vào' : log.trang_thai === 'Ra' ? 'Đã Ra' : 'Từ Chối'}
+                                </span>
+                            </div>
+                            <div className="text-right">
+                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Chủ xe / Thời gian</p>
+                                <p className="text-xs font-bold text-slate-700 truncate mb-1">
+                                    {residents.find(r => r.bien_so_xe === log.bien_so_xe)?.ten_chu_xe || "Khách lạ"}
+                                </p>
+                                <p className="text-[10px] font-black text-indigo-500 font-mono">
+                                    {new Date(log.thoi_gian).toLocaleTimeString('vi-VN')}
+                                </p>
+                            </div>
+                          </div>
+                        </motion.div>
+                      ))
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-300 py-20">
+                        <Cpu size={64} strokeWidth={1} className="mb-4 opacity-20" />
+                        <p className="text-xs font-black uppercase tracking-[0.3em] opacity-30">Chờ tín hiệu xe...</p>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* Camera & So Sánh (NHỎ LẠI) */}
-                <div className="col-span-12 lg:col-span-4 flex flex-col gap-6 min-h-0">
-                  {/* Camera Live */}
-                  <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-                    <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
-                      <h3 className="font-bold text-xs text-slate-800 flex items-center gap-2">
-                        <Video size={14} className="text-red-500 animate-pulse" />
-                        TRỰC TIẾP
-                      </h3>
-                      <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">
-                        {cameraMode.toUpperCase()}
-                      </span>
-                    </div>
-                    <div className="aspect-video bg-black relative">
-                      <img
-                        src={lowLatency ? `http://${cameraIp}:81/stream` : "/api/video_feed"}
-                        className="w-full h-full object-cover"
-                        alt="Live"
-                      />
-                      <div className="absolute inset-0 border-2 border-white/10 pointer-events-none" />
-                    </div>
-                  </div>
-
-                  {/* So Sánh Đối Chiếu */}
-                  <div className="flex-1 bg-white rounded-3xl border border-slate-200 shadow-sm flex flex-col min-h-0 overflow-hidden">
-                    <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between bg-indigo-50/30">
-                      <h3 className="font-bold text-xs text-indigo-800 flex items-center gap-2 uppercase tracking-wider">
-                        <Shield size={14} /> Đối Chiếu AI
-                      </h3>
-                      {latestDetection?.gate && (
-                        <span className="text-[10px] font-bold text-indigo-600 border border-indigo-200 px-2 py-0.5 rounded-md">
-                          CỔNG {latestDetection.gate.toUpperCase()}
-                        </span>
-                      )}
-                    </div>
-                    
-                    <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
-                      {latestDetection ? (
-                        <>
-                          <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-2xl border border-slate-100">
-                             <div className="flex-1">
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Biển số phát hiện</p>
-                                <p className="text-xl font-black text-slate-900 font-mono">{latestDetection.plate}</p>
-                             </div>
-                             <div className="text-right">
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Độ tin cậy</p>
-                                <p className="text-sm font-bold text-indigo-600">{(latestDetection.confidence! * 100).toFixed(1)}%</p>
-                             </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-3">
-                            <div className="space-y-1.5">
-                              <p className="text-[10px] font-bold text-slate-500 text-center uppercase">Lúc Vào Bãi</p>
-                              <div className="aspect-[4/3] bg-slate-100 rounded-xl overflow-hidden border border-slate-200 flex items-center justify-center">
-                                {latestDetection.entry_image ? (
-                                  <img src={latestDetection.entry_image} className="w-full h-full object-cover" />
-                                ) : (
-                                  <Activity size={24} className="text-slate-300" />
-                                )}
-                              </div>
-                            </div>
-                            <div className="space-y-1.5">
-                              <p className="text-[10px] font-bold text-slate-500 text-center uppercase">Hiện Tại</p>
-                              <div className="aspect-[4/3] bg-slate-100 rounded-xl overflow-hidden border-indigo-500 border-2 flex items-center justify-center">
-                                {latestDetection.image ? (
-                                  <img src={latestDetection.image} className="w-full h-full object-cover" />
-                                ) : (
-                                  <Camera size={24} className="text-slate-300" />
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className={`p-3 rounded-2xl border animate-in fade-in slide-in-from-bottom-2 duration-500 ${
-                            latestDetection.is_resident ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100'
-                          }`}>
-                            <div className="flex items-center gap-2 mb-1">
-                               {latestDetection.is_resident ? <CheckCircle2 size={16} className="text-emerald-600" /> : <AlertTriangle size={16} className="text-red-600" />}
-                               <span className={`text-xs font-bold uppercase ${latestDetection.is_resident ? 'text-emerald-700' : 'text-red-700'}`}>
-                                 {latestDetection.is_resident ? 'Cư Dân Hợp Lệ' : 'Khách Lạ / Từ Chối'}
-                               </span>
-                            </div>
-                            <p className="text-sm font-medium text-slate-700">
-                               {latestDetection.is_resident ? `Chào mừng ${latestDetection.owner}! Hệ thống đã mở Barrier.` : `Cảnh báo: Phát hiện xe không thuộc danh sách cư dân.`}
-                            </p>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="flex-1 flex flex-col items-center justify-center text-slate-300 gap-2 opacity-50">
-                          <Cpu size={48} strokeWidth={1} />
-                          <p className="text-xs font-bold uppercase tracking-widest">Đang chờ tín hiệu...</p>
+                {/* RIGHT: COMPACT MONITORING (3/10) */}
+                <div className="col-span-3 space-y-6">
+                    {/* Gate 1 Feed */}
+                    <div className="glass-card rounded-[2.5rem] p-5 border border-slate-200/60 shadow-sm">
+                        <div className="flex items-center justify-between mb-3 px-1">
+                            <h3 className="text-[10px] font-black uppercase tracking-widest text-emerald-600 flex items-center gap-2">
+                                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                                LÀN VÀO (GATE 1)
+                            </h3>
+                            <button onClick={() => handleManualOpen(1)} className="bg-emerald-50 text-emerald-600 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase hover:bg-emerald-100 transition-all border border-emerald-100">Bấm Mở</button>
                         </div>
-                      )}
+                        <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-inner border-2 border-slate-50">
+                            <img src={cameraMode === 'esp32' ? `http://${gate1Ip}:81/stream` : '/api/video_feed'} className="w-full h-full object-cover" alt="Gate 1" />
+                        </div>
                     </div>
-                  </div>
+
+                    {/* Gate 2 Feed */}
+                    <div className="glass-card rounded-[2.5rem] p-5 border border-slate-200/60 shadow-sm">
+                        <div className="flex items-center justify-between mb-3 px-1">
+                            <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-600 flex items-center gap-2">
+                                <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+                                LÀN RA (GATE 2)
+                            </h3>
+                            <button onClick={() => handleManualOpen(2)} className="bg-orange-50 text-orange-600 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase hover:bg-orange-100 transition-all border border-orange-100">Bấm Mở</button>
+                        </div>
+                        <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-inner border-2 border-slate-50">
+                            <img src={cameraMode === 'esp32' ? `http://${gate2Ip}:81/stream` : '/api/video_feed'} className="w-full h-full object-cover" alt="Gate 2" />
+                        </div>
+                    </div>
+
+                    {/* System Pulse Card */}
+                    <div className="p-6 rounded-[2.5rem] bg-slate-900 text-white shadow-2xl relative overflow-hidden">
+                        <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/20 rounded-full -mr-10 -mt-10 blur-2xl" />
+                        <h4 className="text-[10px] font-black uppercase tracking-[0.2em] mb-4 text-slate-400 border-b border-slate-800 pb-3">Hệ thống Trực tuyến</h4>
+                        <div className="space-y-4">
+                            <div className="flex items-center justify-between">
+                                <span className="text-xs font-bold text-slate-400">Server API</span>
+                                <div className={`px-2 py-1 rounded text-[10px] font-black ${apiStatus === 'online' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}>
+                                    {apiStatus.toUpperCase()}
+                                </div>
+                            </div>
+                            <div className="flex items-center justify-between">
+                                <span className="text-xs font-bold text-slate-400">AI Worker (Dual)</span>
+                                <div className="px-2 py-1 rounded text-[10px] font-black bg-indigo-500/10 text-indigo-400">
+                                    STABLE
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
               </div>
             </div>
@@ -605,52 +671,106 @@ export default function App() {
           {/* ══════════ RESIDENTS ══════════ */}
           {activeTab === 'residents' && (
             <div className="space-y-5">
-              {/* Add form */}
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                  <Plus size={18} className="text-indigo-600" /> Thêm cư dân mới
-                </h3>
-                <div className="grid grid-cols-3 gap-3 mb-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">Biển số xe *</label>
-                    <input
-                      type="text"
-                      placeholder="VD: 30A-12345"
-                      value={newResident.bien_so_xe}
-                      onChange={e => setNewResident(p => ({ ...p, bien_so_xe: e.target.value.toUpperCase() }))}
-                      className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 font-mono"
-                    />
+              {/* Add/Edit form */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 overflow-hidden">
+                <div className="flex justify-between items-start gap-6">
+                  <div className="flex-1">
+                    <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                        {newResident.id ? <Edit size={18} className="text-orange-500" /> : <Plus size={18} className="text-indigo-600" />}
+                        {newResident.id ? 'Cập nhật cư dân' : 'Thêm cư dân mới'}
+                    </h3>
+                    <div className="grid grid-cols-2 gap-3 mb-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1">Biển số xe *</label>
+                        <input
+                          type="text"
+                          placeholder="VD: 30A-12345"
+                          value={newResident.bien_so_xe}
+                          onChange={e => setNewResident(p => ({ ...p, bien_so_xe: e.target.value.toUpperCase() }))}
+                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 font-mono font-bold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1">Tên chủ xe *</label>
+                        <input
+                          type="text"
+                          placeholder="Họ tên đầy đủ"
+                          value={newResident.ten_chu_xe}
+                          onChange={e => setNewResident(p => ({ ...p, ten_chu_xe: e.target.value }))}
+                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-xs font-semibold text-slate-600 mb-1">Số căn hộ</label>
+                        <input
+                          type="text"
+                          placeholder="VD: A1-01"
+                          value={newResident.so_can_ho}
+                          onChange={e => setNewResident(p => ({ ...p, so_can_ho: e.target.value }))}
+                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                        />
+                      </div>
+                    </div>
+                    {addError && <p className="text-red-600 text-[11px] mb-3 font-bold">{addError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleAddResident}
+                        disabled={addingResident}
+                        className={`flex items-center gap-2 ${newResident.id ? 'bg-orange-500 hover:bg-orange-600' : 'bg-indigo-600 hover:bg-indigo-700'} text-white px-5 py-2.5 rounded-xl text-xs font-bold transition-all disabled:opacity-50`}
+                      >
+                        {addingResident ? <RefreshCw size={14} className="animate-spin" /> : (newResident.id ? <Save size={14} /> : <Plus size={14} />)}
+                        {newResident.id ? 'Cập nhật' : 'Lưu cư dân'}
+                      </button>
+                      
+                      {newResident.id && (
+                        <button
+                          onClick={() => setNewResident({ id: null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', anh_dang_ky: '' })}
+                          className="text-slate-500 hover:bg-slate-100 px-4 py-2.5 rounded-xl text-xs font-bold transition-all"
+                        >
+                          Hủy bỏ
+                        </button>
+                      )}
+
+                      {!newResident.id && (
+                        <button
+                          onClick={handleScanResidentPlate}
+                          disabled={scanningForRegistration}
+                          className="flex items-center gap-2 bg-emerald-50 text-emerald-600 border border-emerald-100 px-4 py-2.5 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-all disabled:opacity-50 ml-auto"
+                        >
+                          {scanningForRegistration ? <RefreshCw size={14} className="animate-spin" /> : <Camera size={14} />}
+                          Quét từ Camera
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">Tên chủ xe *</label>
-                    <input
-                      type="text"
-                      placeholder="Họ tên đầy đủ"
-                      value={newResident.ten_chu_xe}
-                      onChange={e => setNewResident(p => ({ ...p, ten_chu_xe: e.target.value }))}
-                      className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">Số căn hộ</label>
-                    <input
-                      type="text"
-                      placeholder="VD: A1-01"
-                      value={newResident.so_can_ho}
-                      onChange={e => setNewResident(p => ({ ...p, so_can_ho: e.target.value }))}
-                      className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-                    />
+
+                  {/* Camera Preview for registration */}
+                  <div className="w-56 h-40 bg-slate-100 rounded-2xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center relative overflow-hidden group">
+                    {newResident.anh_dang_ky ? (
+                        <img src={`data:image/jpeg;base64,${newResident.anh_dang_ky}`} className="w-full h-full object-cover" />
+                    ) : (
+                        cameraMode === 'esp32' ? (
+                            <img src={`/api/video_feed?t=${Date.now()}`} className="w-full h-full object-cover opacity-50" />
+                        ) : (
+                            <div className="text-center p-4">
+                                <Camera size={24} className="mx-auto text-slate-300 mb-2" />
+                                <p className="text-[10px] font-bold text-slate-400">Xem trước đăng ký</p>
+                            </div>
+                        )
+                    )}
+                    {newResident.anh_dang_ky && (
+                        <button 
+                            onClick={() => setNewResident(p => ({ ...p, anh_dang_ky: '' }))}
+                            className="absolute top-2 right-2 bg-white/80 backdrop-blur-sm p-1 rounded-full text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                            <Trash2 size={12} />
+                        </button>
+                    )}
+                    <div className="absolute top-2 left-2 px-1.5 py-0.5 bg-black/50 backdrop-blur-sm rounded text-[8px] text-white font-bold uppercase tracking-widest">
+                        Preview
+                    </div>
                   </div>
                 </div>
-                {addError && <p className="text-red-600 text-xs mb-3">{addError}</p>}
-                <button
-                  onClick={handleAddResident}
-                  disabled={addingResident}
-                  className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-                >
-                  {addingResident ? <RefreshCw size={15} className="animate-spin" /> : <Plus size={15} />}
-                  Thêm cư dân
-                </button>
               </div>
 
               {/* List */}
@@ -671,6 +791,7 @@ export default function App() {
                         <th className="px-6 py-3 text-left">Biển số</th>
                         <th className="px-6 py-3 text-left">Chủ xe</th>
                         <th className="px-6 py-3 text-left">Căn hộ</th>
+                        <th className="px-6 py-3 text-right pr-12">Đăng ký</th>
                         <th className="px-6 py-3 text-right">Hành động</th>
                       </tr>
                     </thead>
@@ -682,13 +803,33 @@ export default function App() {
                           </td>
                           <td className="px-6 py-4 text-slate-700 font-bold">{r.ten_chu_xe}</td>
                           <td className="px-6 py-4 text-slate-500 font-medium">{r.so_can_ho || '—'}</td>
+                          <td className="px-6 py-4 text-right pr-12">
+                            {r.anh_dang_ky ? (
+                              <img 
+                                src={`data:image/jpeg;base64,${r.anh_dang_ky}`} 
+                                className="inline-block w-10 h-6 object-cover rounded shadow-sm border border-slate-100 hover:scale-[3] transition-transform origin-right z-10 relative cursor-zoom-in" 
+                              />
+                            ) : (
+                              <span className="text-[10px] text-slate-300 italic font-bold">No Image</span>
+                            )}
+                          </td>
                           <td className="px-6 py-4 text-right">
-                            <button
-                              onClick={() => handleDeleteResident(r.id)}
-                              className="text-red-400 hover:text-red-600 hover:bg-red-50 p-2 rounded-xl transition-all"
-                            >
-                              <Trash2 size={16} />
-                            </button>
+                            <div className="flex justify-end gap-1">
+                                <button
+                                    onClick={() => startEditResident(r)}
+                                    className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                                    title="Sửa thông tin"
+                                >
+                                    <RefreshCw size={14} />
+                                </button>
+                                <button
+                                    onClick={() => handleDeleteResident(r.id)}
+                                    className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                                    title="Xóa cư dân"
+                                >
+                                    <Trash2 size={14} />
+                                </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -722,17 +863,22 @@ export default function App() {
                 <div className="p-6 space-y-4">
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">IP Camera ESP32</label>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">IP Làn VÀO (Gate 1)</label>
                       <input 
                         type="text" 
-                        value={cameraIp} 
-                        onChange={e => setCameraIp(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all"
+                        value={gate1Ip} 
+                        onChange={e => setGate1Ip(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all font-mono"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">Cổng COM Arduino</label>
-                      <input type="text" defaultValue="COM3" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all" />
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">IP Làn RA (Gate 2)</label>
+                      <input 
+                        type="text" 
+                        value={gate2Ip} 
+                        onChange={e => setGate2Ip(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all font-mono"
+                      />
                     </div>
                   </div>
                   <div>
@@ -774,8 +920,13 @@ export default function App() {
               </div>
 
               <div className="flex justify-end">
-                <button className="flex items-center gap-2 bg-indigo-600 text-white px-6 py-3 rounded-2xl text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-95">
-                  <Save size={18} /> Lưu cấu hình
+                <button 
+                  onClick={saveSystemConfig}
+                  disabled={isUpdatingConfig}
+                  className="flex items-center gap-2 bg-indigo-600 text-white px-6 py-3 rounded-2xl text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-95 disabled:opacity-50"
+                >
+                  {isUpdatingConfig ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
+                  Lưu cấu hình
                 </button>
               </div>
             </div>
@@ -789,78 +940,111 @@ export default function App() {
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function NavItem({ icon, label, active = false, onClick }: {
-  icon: React.ReactNode; label: string; active?: boolean; onClick?: () => void;
-}) {
+function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-bold transition-all duration-300 ${
-        active
-          ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100 translate-x-1'
-          : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800 border border-transparent'
+      className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all duration-300 ${
+        active 
+          ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100 translate-x-1' 
+          : 'text-slate-500 hover:bg-slate-50 hover:text-indigo-600'
       }`}
     >
-      {icon}
-      {label}
+      <span className={active ? 'text-white' : 'text-slate-400'}>{icon}</span>
+      <span className="font-bold text-sm tracking-tight">{label}</span>
     </button>
   );
 }
 
-function StatCard({ title, value, icon, color, subValue }: {
-  title: string; value: string | number; icon: React.ReactNode; color: string; subValue?: string;
-}) {
-  const bg: Record<string, string> = {
-    indigo: 'bg-indigo-50 text-indigo-600', emerald: 'bg-emerald-50 text-emerald-600', orange: 'bg-orange-50 text-orange-600', red: 'bg-red-50 text-red-600'
+function StatCard({ title, value, icon, color }: { title: string; value: number | string; icon: React.ReactNode; color: 'indigo' | 'emerald' | 'orange' | 'red' }) {
+  const colors = {
+    indigo: 'bg-indigo-50 text-indigo-600 border-indigo-100',
+    emerald: 'bg-emerald-50 text-emerald-600 border-emerald-100',
+    orange: 'bg-orange-50 text-orange-600 border-orange-100',
+    red: 'bg-red-50 text-red-600 border-red-100'
   };
+  
   return (
-    <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm flex flex-col gap-3 group hover:border-indigo-300 transition-all">
+    <motion.div 
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={`p-5 rounded-3xl border shadow-sm ${colors[color]} flex flex-col gap-3 group hover:scale-[1.02] transition-all`}
+    >
       <div className="flex items-center justify-between">
-        <div className={`w-12 h-12 rounded-2xl ${bg[color] || 'bg-slate-50'} flex items-center justify-center shrink-0 transition-transform group-hover:scale-110`}>
-          {icon}
-        </div>
-        {subValue && (
-            <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-md ${
-                value === "ĐÃ ĐẦY" ? 'bg-red-100 text-red-600' : 'bg-indigo-100 text-indigo-600'
-            }`}>
-                {subValue}
-            </span>
-        )}
+        <span className="text-[10px] font-black uppercase tracking-widest opacity-70">{title}</span>
+        {icon}
       </div>
-      <div>
-        <h4 className="text-2xl font-black text-slate-800 tracking-tight leading-none">{value}</h4>
-        <p className="text-[11px] font-bold text-slate-400 mt-1 uppercase tracking-wider">{title}</p>
+      <p className="text-3xl font-black">{value}</p>
+    </motion.div>
+  );
+}
+
+function TrangThaiTag({ trang_thai }: { trang_thai: string }) {
+  const isVao = trang_thai === 'Vao';
+  const isRa = trang_thai === 'Ra';
+  return (
+    <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-widest ${
+      isVao ? 'bg-emerald-100 text-emerald-700' : 
+      isRa ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700'
+    }`}>
+      {isVao ? 'Vào' : isRa ? 'Ra' : 'Từ chối'}
+    </span>
+  );
+}
+
+function HardwareStatus({ label, icon, status }: { label: string; icon: React.ReactNode; status: 'online' | 'offline' | 'simulated' }) {
+  return (
+    <div className="flex items-center gap-3 px-3 py-2 rounded-xl transition-all hover:bg-white/50">
+      <div className={`p-1.5 rounded-lg ${
+        status === 'online' ? 'bg-emerald-50 text-emerald-600' : 
+        status === 'simulated' ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-400'
+      }`}>
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-[10px] font-bold text-slate-800 truncate">{label}</p>
+        <p className={`text-[8px] font-black uppercase tracking-widest ${
+          status === 'online' ? 'text-emerald-500' : 
+          status === 'simulated' ? 'text-blue-500' : 'text-slate-400'
+        }`}>
+          {status === 'online' ? 'Online' : status === 'simulated' ? 'Simulated' : 'Offline'}
+        </p>
       </div>
     </div>
   );
 }
 
-function LogRow({ log }: { log: LogEntry }) {
+function InfoRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors">
-      <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-        log.trang_thai === 'Vao' ? 'bg-emerald-100 text-emerald-600' :
-        log.trang_thai === 'Ra' ? 'bg-orange-100 text-orange-600' :
-        'bg-red-100 text-red-600'
-      }`}>
-        {log.trang_thai === 'Vao' ? <LogIn size={15} /> : log.trang_thai === 'Ra' ? <LogOut size={15} /> : <XCircle size={15} />}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between">
-          <span className="font-mono font-bold text-slate-900 text-xs bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
-            {log.bien_so_xe}
-          </span>
-          <span className="text-[11px] text-slate-400">
-            {new Date(log.thoi_gian).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}
-          </span>
-        </div>
-        <p className={`text-[11px] mt-0.5 font-medium ${
-          log.trang_thai === 'Vao' ? 'text-emerald-600' :
-          log.trang_thai === 'Ra' ? 'text-orange-600' : 'text-red-600'
-        }`}>
-          {log.trang_thai === 'Vao' ? 'Đã vào bãi' : log.trang_thai === 'Ra' ? 'Đã ra bãi' : 'Xe lạ — Từ chối'}
-        </p>
-      </div>
+    <div className="flex items-start justify-between py-2 border-b border-slate-50 last:border-0">
+      <span className="text-slate-500 font-medium text-xs">{label}</span>
+      <span className="text-slate-800 font-semibold text-xs text-right">{value}</span>
+    </div>
+  );
+}
+
+function AnimatedBarrier({ isOpen }: { isOpen: boolean }) {
+  return (
+    <div className="relative w-8 h-8 flex items-center justify-center">
+      <div className={`absolute inset-0 rounded-lg ${isOpen ? 'bg-emerald-100' : 'bg-slate-100'} transition-colors duration-500`} />
+      <motion.div
+        initial={false}
+        animate={{ rotate: isOpen ? -90 : 0 }}
+        transition={{ type: "spring", stiffness: 100, damping: 10 }}
+        className="w-1.5 h-6 bg-slate-800 rounded-full origin-bottom"
+        style={{ marginBottom: -12 }}
+      />
+      <div className="absolute bottom-1 w-3 h-1 bg-slate-400 rounded-full" />
+    </div>
+  );
+}
+
+function ScanningOverlay() {
+  return (
+    <div className="absolute inset-0 pointer-events-none overflow-hidden rounded-xl">
+      <div className="w-full h-full bg-indigo-500/10" />
+      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-indigo-400 to-transparent shadow-[0_0_15px_rgba(99,102,241,0.8)] animate-scan" />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(99,102,241,0.1)_0%,transparent_100%)]" />
     </div>
   );
 }
@@ -871,13 +1055,9 @@ function BBoxOverlay({ detection, videoRef, isIPCam = false }: {
   isIPCam?: boolean;
 }) {
   if (!detection.bbox) return null;
-  
-  // ESP32 cam thường có resolution khác, hoặc mirror. 
-  // Ở đây ta dùng tỉ lệ dựa trên frame nhận được từ backend.
   const vw = isIPCam ? 640 : (videoRef.current?.videoWidth || 1280);
   const vh = isIPCam ? 480 : (videoRef.current?.videoHeight || 720);
   const [x1, y1, x2, y2] = detection.bbox;
-  // Tính % vị trí relative
   const left = `${(x1 / vw * 100).toFixed(2)}%`;
   const top = `${(y1 / vh * 100).toFixed(2)}%`;
   const width = `${((x2 - x1) / vw * 100).toFixed(2)}%`;
@@ -896,15 +1076,6 @@ function BBoxOverlay({ detection, videoRef, isIPCam = false }: {
           {detection.matched_plate || detection.plate} · {((detection.confidence || 0) * 100).toFixed(0)}%
         </div>
       </div>
-    </div>
-  );
-}
-
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-start justify-between py-2 border-b border-slate-50 last:border-0">
-      <span className="text-slate-500 font-medium text-xs">{label}</span>
-      <span className="text-slate-800 font-semibold text-xs text-right">{value}</span>
     </div>
   );
 }
