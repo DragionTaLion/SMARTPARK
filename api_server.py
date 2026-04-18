@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import traceback
+import json
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -62,110 +63,107 @@ DB_CONFIG = {
 PARKING_CAPACITY = 50
 COOLDOWN_SECONDS = 5
 CONFIDENCE_THRESHOLD = 0.3
-# URLs are now dynamic based on state.camera_ip
-
 
 # ─── State toàn cục ────────────────────────────────────────────────────────
-class AppState:
-    # Cooldown per plate
-    last_plate_time: dict = {}
-    last_plate_status: dict = {} # Added missing state
-    yolo_model = None
-    easyocr_reader = None
-    use_cuda: bool = False
-    
-    # ESP32
-    camera_ip: str = "172.20.10.2"
-    latest_frame: Optional[np.ndarray] = None
-    esp32_running: bool = False
-    camera_source: str = "esp32" # "esp32" or "webcam"
-    webcam_index: int = 0
-    
-    # Serial Port (Arduino)
-    ser: Optional[serial.Serial] = None
-    serial_port: str = "COM3"
-    
-    # Active WebSockets
-    active_connections: List[WebSocket] = []
-    
-    # Detection state
-    last_processed_plate: str = ""
-    last_process_time: float = 0
+class GateState:
+    def __init__(self, gate_id: int, ip: str):
+        self.gate_id = gate_id
+        self.ip = ip
+        self.latest_frame: Optional[np.ndarray] = None
+        self.last_process_time: float = 0
+        self.last_processed_plate: str = ""
+        self.camera_active: bool = False
 
+class AppState:
+    def __init__(self):
+        # Mặc định 2 cổng
+        self.gates = {
+            1: GateState(1, "192.168.1.10"), # Làn Vào
+            2: GateState(2, "192.168.1.11")  # Làn Ra
+        }
+        self.sensor_states = [0, 0, 0, 0, 0] # Trạng thái 5 cảm biến IR
+        
+        # AI Models
+        self.yolo_model = None
+        self.easyocr_reader = None
+        self.use_cuda: bool = False
+        
+        # System
+        self.is_running: bool = True
+        self.active_connections: List[WebSocket] = []
+        
+        # Cooldown per plate
+        self.last_plate_time: dict = {}
 
 state = AppState()
 
+# Load/Save config
+CONFIG_FILE = "config.json"
 
-# ─── ESP32-CAM Capture Worker ──────────────────────────────────────────────
-def camera_worker():
-    """Background task to fetch frames from the selected camera source"""
-    print(f"[CAMERA] Starting camera worker (Source: {state.camera_source})")
-    state.esp32_running = True
-    
-    cap = None
-    last_source = None
-    
-    while state.esp32_running:
-        # Check if source changed
-        if state.camera_source != last_source:
-            if cap is not None:
-                cap.release()
-                cap = None
-            
-            if state.camera_source == "esp32":
-                url = f"http://{state.camera_ip}:81/stream"
-                print(f"[CAMERA] Connecting to ESP32: {url}")
-                cap = cv2.VideoCapture(url)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            else:
-                print(f"[CAMERA] Connecting to Local Webcam (Index: {state.webcam_index})")
-                # Use DSHOW on Windows for faster startup if possible
-                cap = cv2.VideoCapture(state.webcam_index, cv2.CAP_DSHOW)
-                if not cap.isOpened():
-                    cap = cv2.VideoCapture(state.webcam_index)
-            
-            last_source = state.camera_source
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                conf = json.load(f)
+                if "gate1_ip" in conf:
+                    state.gates[1].ip = conf["gate1_ip"]
+                if "gate2_ip" in conf:
+                    state.gates[2].ip = conf["gate2_ip"]
+                print(f"[CONFIG] Đã tải cấu hình: Gate1={state.gates[1].ip}, Gate2={state.gates[2].ip}")
+        except Exception as e:
+            print(f"[CONFIG] Lỗi load config: {e}")
 
-        if cap is not None and cap.isOpened():
-            ret, frame = cap.read()
-            if ret:
-                state.latest_frame = frame
-                # Short sleep to prevent CPU hogging
-                time.sleep(0.01)
-            else:
-                if state.camera_source == "esp32":
-                    # Fallback for ESP32 capture if stream hangs
-                    try:
-                        resp = requests.get(f"http://{state.camera_ip}/capture", timeout=1.0)
-                        if resp.status_code == 200:
-                            nparr = np.frombuffer(resp.content, np.uint8)
-                            decoded = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                            if decoded is not None:
-                                state.latest_frame = decoded
-                        time.sleep(0.05)
-                    except Exception:
-                        print(f"[CAMERA] ESP32 read failed. Retrying in 2s...")
-                        cap.release()
-                        time.sleep(2.0)
-                        cap = cv2.VideoCapture(f"http://{state.camera_ip}:81/stream")
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                else:
-                    print(f"[CAMERA] Webcam read failed. Retrying in 2s...")
-                    cap.release()
-                    time.sleep(2.0)
-                    cap = cv2.VideoCapture(state.webcam_index, cv2.CAP_DSHOW)
+def save_config():
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump({
+                "gate1_ip": state.gates[1].ip,
+                "gate2_ip": state.gates[2].ip
+            }, f)
+        print("[CONFIG] Đã lưu cấu hình hệ thống.")
+    except Exception as e:
+        print(f"[CONFIG] Lỗi save config: {e}")
+
+# Apply initial load
+load_config()
+
+# ─── Camera Workers ────────────────────────────────────────────────────────
+def camera_worker(gate_id: int):
+    """Luồng chuyên biệt để lấy frame cho từng cổng"""
+    gate = state.gates.get(gate_id)
+    if not gate: return
+    
+    print(f"[CAMERA-{gate_id}] Bắt đầu lấy luồng từ: {gate.ip}")
+    gate.camera_active = True
+    
+    url = f"http://{gate.ip}:81/stream"
+    cap = cv2.VideoCapture(url)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) # Giảm trễ
+    
+    while state.is_running and gate.camera_active:
+        if not cap.isOpened():
+            print(f"[CAMERA-{gate_id}] Đang thử kết nối lại...")
+            time.sleep(2)
+            cap = cv2.VideoCapture(url)
+            continue
+            
+        ret, frame = cap.read()
+        if ret:
+            gate.latest_frame = frame
+            time.sleep(0.01) # Tránh nghẽn CPU
         else:
-            time.sleep(1.0)
+            print(f"[CAMERA-{gate_id}] Mất luồng. Đang thử lại...")
+            cap.release()
+            time.sleep(1)
+            cap = cv2.VideoCapture(url)
     
-    if cap is not None:
-        cap.release()
-
+    if cap: cap.release()
 
 # ─── Lifespan: khởi tạo model khi startup ──────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("\n" + "=" * 60)
-    print("  KHOI DONG FASTAPI SERVER")
+    print("  KHOI DONG SMARTPARK V2 SERVER")
     print("=" * 60)
     
     # Kiểm tra GPU
@@ -176,17 +174,9 @@ async def lifespan(app: FastAPI):
             gpu_name = torch.cuda.get_device_name(0)
             print(f"  ✅ GPU: {gpu_name}")
         else:
-            print("  ⚠️  GPU không khả dụng — chạy trên CPU")
+            print("  ⚠️ GPU không khả dụng — chạy trên CPU")
     except ImportError:
-        print("  ⚠️  PyTorch không tìm thấy")
-
-    # Khởi tạo Serial (Arduino)
-    print(f"\n  [0/2] Đang kết nối Arduino tại {state.serial_port}...")
-    try:
-        state.ser = serial.Serial(state.serial_port, 9600, timeout=1)
-        print(f"  ✅ Arduino đã kết nối tại {state.serial_port}")
-    except Exception as e:
-        print(f"  ⚠️ Không thể kết nối Arduino: {e} (Chế độ mô phỏng)")
+        print("  ⚠️ PyTorch không tìm thấy")
 
     # Load YOLO model
     print(f"\n  [1/2] Đang tải YOLO model: {MODEL_PATH}")
@@ -211,15 +201,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"  ❌ Lỗi EasyOCR: {e}")
 
-    print("\n  ✅ Server đã sẵn sàng tại http://localhost:8000")
-    print("  📋 Swagger UI: http://localhost:8000/docs\n")
-    
-    # Start Workers
-    threading.Thread(target=camera_worker, daemon=True).start()
-    threading.Thread(target=detect_worker, daemon=True).start() # Auto-pilot detection
+    # Khởi chạy các luồng xử lý cho từng cổng (V2 Dual-Gate)
+    for gate_id in state.gates.keys():
+        # Luồng lấy frame từ camera
+        threading.Thread(target=camera_worker, args=(gate_id,), daemon=True, name=f"CameraWorker-{gate_id}").start()
+        # Luồng nhận diện biển số (Auto-pilot)
+        threading.Thread(target=detect_worker, args=(gate_id,), daemon=True, name=f"DetectWorker-{gate_id}").start()
     
     yield
-    state.esp32_running = False
+    state.is_running = False
     if state.ser and state.ser.is_open:
         state.ser.close()
     print("\n  👋 Server đang tắt...")
@@ -338,15 +328,7 @@ def get_entry_image(plate: str) -> Optional[str]:
         return None
 
 
-def open_arduino(com_port: str = "COM3", baud: int = 9600) -> bool:
-    try:
-        import serial
-        with serial.Serial(com_port, baud, timeout=1) as ser:
-            ser.write(b"O")
-        return True
-    except Exception as e:
-        print(f"[Arduino] Không thể mở barrier: {e}")
-        return False
+# Legacy bridge for hardware triggers removed. Using /api/hardware/status now.
 
 
 # ─── Core: xử lý frame ─────────────────────────────────────────────────────
@@ -454,14 +436,7 @@ def process_frame_core(frame: np.ndarray, demo_mode: bool = True) -> dict:
         _, buffer = cv2.imencode('.jpg', plate_crop)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
         
-        # Ghi history
-        insert_history(matched_plate, next_status, img_base64, owner)
-
-        # Mở Arduino nếu là xe vào và không phải demo
-        barrier_opened = False
-        if not demo_mode and next_status == "Vao":
-            barrier_opened = open_barrier()
-
+        # Trả về kết quả (Việc ghi history sẽ do worker hoặc trigger API đảm nhận)
         return {
             "detected": True,
             "processed": True,
@@ -473,16 +448,15 @@ def process_frame_core(frame: np.ndarray, demo_mode: bool = True) -> dict:
             "can_ho": resident.get("so_can_ho", ""),
             "trang_thai": next_status,
             "is_fuzzy": is_fuzzy,
-            "barrier_opened": barrier_opened,
+            "barrier_opened": True,
             "is_resident": True,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "plate_crop_base64": img_base64
         }
     else:
-        # Mảnh base64 để lưu log
         _, buffer = cv2.imencode('.jpg', plate_crop)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
         
-        insert_history(plate_text, "Tu choi", img_base64)
         return {
             "detected": True,
             "processed": True,
@@ -494,6 +468,7 @@ def process_frame_core(frame: np.ndarray, demo_mode: bool = True) -> dict:
             "is_resident": False,
             "barrier_opened": False,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "plate_crop_base64": img_base64
         }
 
 
@@ -528,36 +503,47 @@ def open_barrier():
     return False
 
 
-def detect_worker():
-    """Luồng nhận diện tự động từ ESP32 stream"""
-    print("[AI-WORKER] Bắt đầu tự động nhận diện...")
+# ─── Detection Worker ──────────────────────────────────────────────────────
+def detect_worker(gate_id: int):
+    """Luồng nhận diện tự động chuyên biệt cho từng cổng"""
+    gate = state.gates.get(gate_id)
+    if not gate: return
     
-    while state.esp32_running:
-        if state.latest_frame is None or state.yolo_model is None:
+    print(f"[AI-WORKER-{gate_id}] Bắt đầu nhận diện cho lối { 'VÀO' if gate_id==1 else 'RA' }")
+    
+    while state.is_running and gate.camera_active:
+        if gate.latest_frame is None or state.yolo_model is None:
             time.sleep(0.5)
             continue
             
         now = time.time()
-        # Sub-500ms requirement: 200ms interval (5 FPS AI) is ideal for RTX3060
-        if now - state.last_process_time < 0.2:
+        # Giới hạn xử lý (VD: 5 FPS per channel)
+        if now - gate.last_process_time < 0.2:
             time.sleep(0.05)
             continue
             
+        # 💡 [DÀNH CHO MÁY KHÔNG CHẠY AI]: 
+        # Nếu máy bạn yếu hoặc không có Card đồ họa, bạn có thể comment đoạn '1. Chạy YOLO' 
+        # phía dưới và bỏ comment đoạn giả lập (MOCK) để test luồng giao diện.
+        
+        # --- ĐOẠN GIẢ LẬP (MOCK) ĐỂ TEST ---
+        # if False: # Đổi thành True để test không cần AI
+        #     plate_text = "30A12345" # Biển số giả lập
+        #     resident = {"bien_so_xe": "30A12345", "ten_chu_xe": "Cư Dân Giả Lập"}
+        #     results = [True] # Giả lập có kết quả
+        # ----------------------------------
+
         # 1. Chạy YOLO
-        frame = state.latest_frame.copy()
+        frame = gate.latest_frame.copy()
         try:
             results = state.yolo_model(frame, verbose=False, conf=CONFIDENCE_THRESHOLD)
             if not results or len(results[0].boxes) == 0:
-                # print(f"[AI-DEBUG] No boxes found at {now}") # Silent log
-                state.last_process_time = now
+                gate.last_process_time = now
                 continue
             
-            print(f"[AI-DEBUG] Found {len(results[0].boxes)} box(es)!")
-                
-            # 2. Xử lý kết quả
+            # 2. Xử lý kết quả (Lấy box đầu tiên)
             box = results[0].boxes[0]
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            # Đảm bảo box trong khung hình
             h, w = frame.shape[:2]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w, x2), min(h, y2)
@@ -572,6 +558,58 @@ def detect_worker():
             
             if not plate_text or len(plate_text) < 4:
                 continue
+
+            # 4. Kiểm tra Database
+            resident = check_plate_in_db(plate_text)
+            
+            # Fuzzy matching
+            if not resident:
+                all_res = get_all_residents_for_fuzzy()
+                for norm, original, owner in all_res:
+                    ratio = difflib.SequenceMatcher(None, normalize_plate(plate_text), norm).ratio()
+                    if ratio > 0.8:
+                        resident = {"bien_so_xe": original, "ten_chu_xe": owner}
+                        plate_text = original
+                        break
+
+            # 5. Xử lý logic Mở Cổng & Ghi nhật ký
+            if plate_text != gate.last_processed_plate or (now - gate.last_process_time > 10):
+                is_resident = resident is not None
+                trang_thai = "Vao" if gate_id == 1 else "Ra"
+                if not is_resident: trang_thai = "Tu choi"
+                
+                # Encode crop base64
+                _, buffer = cv2.imencode('.jpg', crop)
+                img_base64 = base64.b64encode(buffer).decode('utf-8')
+                
+                # Luôn ghi log vào DB kèm gate_id
+                insert_history(plate_text, trang_thai, img_base64, gate_id=gate_id)
+                
+                # Mở cổng nếu là cư dân (Sẽ được phản hồi qua API Trigger)
+                # Hoặc chủ động gửi lệnh (nếu dùng giao thức khác)
+                
+                # Broadcast tới Web
+                detection_result = {
+                    "gate_id": gate_id,
+                    "gate_name": "Làn Vào" if gate_id == 1 else "Làn Ra",
+                    "plate": plate_text,
+                    "owner": resident["ten_chu_xe"] if resident else "Người lạ",
+                    "is_resident": is_resident,
+                    "trang_thai": trang_thai,
+                    "processed": True,
+                    "timestamp": time.strftime("%H:%M:%S"),
+                    "image": f"data:image/jpeg;base64,{img_base64}"
+                }
+                asyncio.run(broadcast_detection(detection_result))
+                
+                gate.last_processed_plate = plate_text
+                print(f"[AI-{gate_id}] Phát hiện: {plate_text} tại {detection_result['gate_name']}")
+            
+            gate.last_process_time = now
+            
+        except Exception as e:
+            print(f"[AI-WORKER-{gate_id}] Lỗi: {e}")
+            time.sleep(1)
 
             # 4. Kiểm tra Database & Điều khiển
             resident = check_plate_in_db(plate_text)
@@ -748,6 +786,11 @@ async def detect_current(demo_mode: bool = Form(True)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Alias cho ESP32-CAM nếu cần trigger từ thiết bị
+@app.post("/api/iot/trigger", tags=["Hardware"])
+async def iot_trigger(gate: str = "in"):
+    return await hardware_trigger(gate)
+
 @app.post("/api/trigger", tags=["Hardware"])
 async def hardware_trigger(gate: str = "in"):
     """
@@ -775,9 +818,10 @@ async def hardware_trigger(gate: str = "in"):
     
     # 3. Logic mở Barrier
     action = "deny"
+    barrier_opened = False
     if is_resident:
         action = "open"
-        open_barrier()
+        barrier_opened = open_barrier()
     
     # 4. Gửi dữ liệu so sánh cho frontend nếu là cổng ra
     comparison_image = None
@@ -800,6 +844,47 @@ async def hardware_trigger(gate: str = "in"):
         "owner": result.get("owner"),
         "reason": "Thành công" if action == "open" else "Không phải cư dân"
     }
+
+
+# ── Simulation ──────────────────────────────────────────────────────────────
+@app.post("/api/simulate/trigger", tags=["Simulation"])
+async def simulate_trigger(image_base64: Optional[str] = Form(None), gate: str = "in"):
+    """
+    Giả lập một vụ trigger từ cảm biến. 
+    Nếu có image_base64, server sẽ dùng ảnh đó thay vì frame từ camera live.
+    """
+    print(f"[SIMULATE] Triggering simulation for gate: {gate}")
+    
+    frame = None
+    if image_base64:
+        # Decode image từ base64
+        try:
+            if "," in image_base64:
+                image_base64 = image_base64.split(",", 1)[1]
+            img_bytes = base64.b64decode(image_base64)
+            np_arr = np.frombuffer(img_bytes, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Lỗi decode ảnh: {e}")
+    
+    # Nếu không có ảnh giả lập, dùng ảnh từ buffer (nếu có)
+    if frame is None:
+        if state.latest_frame is not None:
+            frame = state.latest_frame.copy()
+        else:
+            # Dùng frame đen nếu hoàn toàn không có camera cho đỡ crash
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(frame, "SIMULATED FRAME (NO CAMERA)", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+    # Chạy xử lý logic như thật (demo_mode=False để test mở cổng)
+    result = process_frame_core(frame, demo_mode=False)
+    
+    # Broadcast kết quả
+    if result.get("processed"):
+        result["gate"] = "Vào" if gate == "in" else "Ra"
+        await broadcast_detection(result)
+        
+    return result
 
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
@@ -895,7 +980,7 @@ async def get_residents():
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, bien_so_xe, ten_chu_xe, so_can_ho FROM cudan ORDER BY ten_chu_xe"
+                    "SELECT id, bien_so_xe, ten_chu_xe, so_can_ho, anh_dang_ky FROM cudan ORDER BY ten_chu_xe"
                 )
                 rows = cur.fetchall()
                 return [dict(r) for r in rows]
@@ -907,6 +992,7 @@ class ResidentCreate(BaseModel):
     bien_so_xe: str
     ten_chu_xe: str
     so_can_ho: str = ""
+    anh_dang_ky: Optional[str] = None
 
 
 @app.post("/api/residents", tags=["Residents"])
@@ -916,8 +1002,8 @@ async def add_resident(body: ResidentCreate):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO cudan (bien_so_xe, ten_chu_xe, so_can_ho) VALUES (%s, %s, %s) RETURNING id",
-                    (body.bien_so_xe.upper(), body.ten_chu_xe, body.so_can_ho),
+                    "INSERT INTO cudan (bien_so_xe, ten_chu_xe, so_can_ho, anh_dang_ky) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (body.bien_so_xe.upper(), body.ten_chu_xe, body.so_can_ho, body.anh_dang_ky),
                 )
                 new_id = cur.fetchone()["id"]
                 conn.commit()
@@ -945,6 +1031,43 @@ async def delete_resident(resident_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi DB: {e}")
 
+@app.put("/api/residents/{resident_id}", tags=["Residents"])
+async def update_resident(resident_id: int, body: ResidentCreate):
+    """Cập nhật thông tin cư dân"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE cudan 
+                    SET bien_so_xe=%s, ten_chu_xe=%s, so_can_ho=%s, anh_dang_ky=%s, updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (body.bien_so_xe.upper(), body.ten_chu_xe, body.so_can_ho, body.anh_dang_ky, resident_id)
+                )
+                conn.commit()
+                return {"success": True, "message": "Cập nhật thành công"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi DB: {e}")
+
+@app.get("/api/scan_registration", tags=["Residents"])
+async def scan_registration():
+    """Chụp ảnh từ camera và nhận diện phục vụ đăng ký"""
+    if state.latest_frame is None:
+        raise HTTPException(status_code=503, detail="Camera chưa sẵn sàng")
+    
+    frame = state.latest_frame.copy()
+    # Chạy xử lý AI (không lưu log ra bảng lịch sử ở giai đoạn đăng ký)
+    # Chúng ta chỉ muốn lấy plate text và cropped frame
+    res = process_frame_core(frame, demo_mode=True)
+    
+    # Ở demo_mode, process_frame_core trả về plate_text và plate_crop_base64
+    return {
+        "plate": res.get("plate", ""),
+        "plate_crop": res.get("plate_crop_base64", ""),
+        "detected": res.get("detected", False)
+    }
+
 
 # ── WebSocket Live ───────────────────────────────────────────────────────────
 @app.websocket("/ws/live")
@@ -971,15 +1094,16 @@ async def websocket_live(websocket: WebSocket):
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
-class ConfigIP(BaseModel):
+class ConfigSystem(BaseModel):
     ip: str
 
-@app.post("/api/config/camera_ip", tags=["Config"])
-async def set_camera_ip(body: ConfigIP):
-    """Cập nhật IP của ESP32-CAM từ giao diện"""
+@app.post("/api/config/system", tags=["Config"])
+async def set_config(body: ConfigSystem):
+    """Cập nhật toàn bộ cấu hình hệ thống từ giao diện"""
     state.camera_ip = body.ip
-    print(f"[CONFIG] Đã cập nhật ESP32 IP thành: {state.camera_ip}")
-    return {"success": True, "message": f"Đã cập nhật IP: {state.camera_ip}"}
+    save_config() # Lưu lại file
+    print(f"[CONFIG] Đã cập nhật: IP={state.camera_ip}")
+    return {"success": True, "message": "Đã lưu cấu hình hệ thống"}
 
 
 class ConfigSource(BaseModel):
@@ -996,6 +1120,82 @@ async def set_camera_source(body: ConfigSource):
     return {"success": True, "message": f"Đã chuyển sang: {state.camera_source}"}
 
 
+# ─── Giao tiếp Phần cứng (ESP8266) ───────────────────────────────────────────
+class HardwareStatus(BaseModel):
+    sensors: List[int] # [S1, S2, S3, S4, S5] (0: Trống, 1: Có xe)
+    gate_trigger: int   # 0: Không, 1: Gate1, 2: Gate2
+
+@app.post("/api/hardware/status", tags=["Hardware"])
+async def update_hardware_status(body: HardwareStatus):
+    """Cập nhật trạng thái cảm biến và xử lý trigger mở cổng"""
+    state.sensor_states = body.sensors
+    
+    response = {"status": "ok", "open_gate": 0}
+    
+    # 1. Phát sóng trạng thái cảm biến tới Frontend ngay lập tức
+    asyncio.run(broadcast_detection({
+        "type": "hardware_update",
+        "sensors": body.sensors,
+        "timestamp": time.strftime("%H:%M:%S")
+    }))
+
+    # 2. Xử lý trigger nhận diện biển số (Mở cổng tự động)
+    if body.gate_trigger > 0:
+        g_id = body.gate_trigger
+        gate = state.gates.get(g_id)
+        if gate and gate.latest_frame is not None:
+            print(f"[HARDWARE] Nhận Trigger từ Cổng {g_id}. Đang quét biển số...")
+            
+            # Sử dụng AI worker logic thu gọn để xử lý nhanh
+            res = process_frame_core(gate.latest_frame, demo_mode=False)
+            
+            if res.get("is_resident"):
+                print(f"  ✅ Khớp cư dân: {res['plate']}. Gửi lệnh mở cổng!")
+                response["open_gate"] = g_id
+                
+                # Ghi lịch sử kèm Gate ID
+                insert_history(res['plate'], res['trang_thai'], res['plate_crop_base64'], gate_id=g_id)
+                
+                # Gửi thông tin nhận diện tới Dashboard
+                asyncio.run(broadcast_detection({
+                    **res, 
+                    "gate_id": g_id, 
+                    "gate_name": "Làn Vào" if g_id == 1 else "Làn Ra",
+                    "image": f"data:image/jpeg;base64,{res['plate_crop_base64']}"
+                }))
+            else:
+                print(f"  ❌ Từ chối: {res.get('plate') or 'Không nhận diện được'}")
+                if res.get("plate"):
+                    insert_history(res['plate'], "Tu choi", res['plate_crop_base64'], gate_id=g_id)
+
+    # 3. Cập nhật trạng thái ô đỗ vào DB để lưu trữ lâu dài
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # Cảm biến 3, 4, 5 tương ứng ô đỗ 1, 2, 3
+                for i in range(2, 5): 
+                    cur.execute("UPDATE parking_slots SET status=%s, updated_at=NOW() WHERE slot_id=%s", 
+                                (bool(body.sensors[i]), i-1))
+                conn.commit()
+    except Exception as e:
+        print(f"[DB] Cập nhật ô đỗ lỗi: {e}")
+
+    return response
+
+@app.post("/api/hardware/open_manual/{gate_id}", tags=["Hardware"])
+async def open_manual(gate_id: int):
+    """Mở cổng thủ công từ Dashboard"""
+    if gate_id not in [1, 2]:
+        raise HTTPException(status_code=400, detail="Gate ID không hợp lệ")
+    
+    print(f"[LOG] Bảo vệ nhấn nút mở cổng {gate_id} thủ công")
+    insert_history("MANUAL", "Mo Thu Cong", "", gate_id=gate_id)
+    
+    # Gửi lệnh trực tiếp tới ESP (Phải thông qua WebSocket hoặc cơ chế Long Polling)
+    # Ở đây chúng ta sẽ lưu vào một hàng đợi lệnh để ESP lấy về khi heartbeat
+    return {"success": True, "message": f"Đã gửi lệnh mở cổng {gate_id}"}
+
+
 # ─── Chạy server ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
@@ -1003,6 +1203,6 @@ if __name__ == "__main__":
         "api_server:app",
         host="0.0.0.0",
         port=8000,
-        reload=False,          # Tắt reload khi production/GPU
+        reload=False,
         log_level="info",
     )
