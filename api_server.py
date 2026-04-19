@@ -80,8 +80,8 @@ class AppState:
     def __init__(self):
         # Mặc định 2 cổng
         self.gates = {
-            1: GateState(1, "192.168.1.10"), # Làn Vào
-            2: GateState(2, "192.168.1.11")  # Làn Ra
+            1: GateState(1, "192.168.0.102"), # Làn Vào
+            2: GateState(2, "192.168.0.102")  # Làn Ra
         }
         self.sensor_states = [0, 0, 0, 0, 0] # Trạng thái 5 cảm biến IR
         
@@ -1299,8 +1299,8 @@ async def websocket_live(websocket: WebSocket):
 
 # ── Config ──────────────────────────────────────────────────────────────────
 class ConfigSystem(BaseModel):
-    gate1_ip: str = "192.168.1.10"
-    gate2_ip: str = "192.168.1.11"
+    gate1_ip: str = "192.168.0.102"
+    gate2_ip: str = "192.168.0.102"
     com_port: str = "COM3"
 
 @app.post("/api/config/system", tags=["Config"])
