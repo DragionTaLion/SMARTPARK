@@ -94,8 +94,8 @@ export default function App() {
   const [scanningForRegistration, setScanningForRegistration] = useState(false);
   const [addError, setAddError] = useState('');
   const [cameraMode, setCameraMode] = useState<'webcam' | 'esp32'>('esp32');
-  const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.1.10');
-  const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.1.11');
+  const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.0.102');
+  const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.0.102');
   const [comPort, setComPort] = useState(() => localStorage.getItem('smartpark_com_port') || 'COM3');
   const [sensorStates, setSensorStates] = useState<number[]>([0, 0, 0, 0, 0]);
   const [parkingSlots, setParkingSlots] = useState<ParkingSlot[]>([
