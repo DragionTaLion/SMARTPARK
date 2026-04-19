@@ -1299,14 +1299,18 @@ async def websocket_live(websocket: WebSocket):
 
 # ── Config ──────────────────────────────────────────────────────────────────
 class ConfigSystem(BaseModel):
-    ip: str
+    gate1_ip: str = "192.168.1.10"
+    gate2_ip: str = "192.168.1.11"
+    com_port: str = "COM3"
 
 @app.post("/api/config/system", tags=["Config"])
 async def set_config(body: ConfigSystem):
-    """Cập nhật toàn bộ cấu hình hệ thống từ giao diện"""
-    state.camera_ip = body.ip
-    save_config() # Lưu lại file
-    print(f"[CONFIG] Đã cập nhật: IP={state.camera_ip}")
+    """Cập nhật toàn bộ cấu hình hệ thống từ giao diện (gate1_ip, gate2_ip, com_port)"""
+    state.gates[1].ip = body.gate1_ip
+    state.gates[2].ip = body.gate2_ip
+    state.com_port = body.com_port
+    save_config()  # Lưu xuống file config.json
+    print(f"[CONFIG] Đã cập nhật: Gate1={body.gate1_ip}, Gate2={body.gate2_ip}, COM={body.com_port}")
     return {"success": True, "message": "Đã lưu cấu hình hệ thống"}
 
 
