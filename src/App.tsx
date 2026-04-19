@@ -4,7 +4,8 @@ import {
   Bell, Search, CheckCircle2, Clock, Video, Download,
   Camera, Cpu, Save, Filter, XCircle, Users, AlertTriangle,
   Wifi, WifiOff, RefreshCw, Plus, Trash2, Shield,
-  Gamepad2, Info, Server, Database, Edit, LayoutGrid
+  Gamepad2, Info, Server, Database, Edit, LayoutGrid,
+  Banknote, TrendingUp, Zap, Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -56,6 +57,8 @@ type Resident = {
   bien_so_xe: string;
   ten_chu_xe: string;
   so_can_ho: string;
+  so_dien_thoai: string;
+  da_thanh_toan: boolean;
   anh_dang_ky?: string;
 };
 
@@ -75,7 +78,7 @@ const apiFetch = async <T,>(path: string, options?: RequestInit): Promise<T> => 
 
 // ════════════════════════════════════════════════════════════════════════════
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'residents' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'residents' | 'settings' | 'revenue'>('dashboard');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [stats, setStats] = useState<Stats>({ inside: 0, entries_today: 0, exits_today: 0, strangers_today: 0 });
   const [residents, setResidents] = useState<Resident[]>([]);
@@ -85,13 +88,15 @@ export default function App() {
   const [logFilter, setLogFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   // New resident form
-  const [newResident, setNewResident] = useState({ id: null as number | null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', anh_dang_ky: '' });
+  const [newResident, setNewResident] = useState({ id: null as number | null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', so_dien_thoai: '', da_thanh_toan: false, anh_dang_ky: '', phi_thang: 500000 });
+  const [selectedResident, setSelectedResident] = useState<Resident | null>(null);
   const [addingResident, setAddingResident] = useState(false);
   const [scanningForRegistration, setScanningForRegistration] = useState(false);
   const [addError, setAddError] = useState('');
   const [cameraMode, setCameraMode] = useState<'webcam' | 'esp32'>('esp32');
   const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.1.10');
   const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.1.11');
+  const [comPort, setComPort] = useState(() => localStorage.getItem('smartpark_com_port') || 'COM3');
   const [sensorStates, setSensorStates] = useState<number[]>([0, 0, 0, 0, 0]);
   const [parkingSlots, setParkingSlots] = useState<ParkingSlot[]>([
     { slot_id: 1, slot_name: 'Ô số 1', status: false },
@@ -100,6 +105,14 @@ export default function App() {
   ]);
   const [lastDetections, setLastDetections] = useState<Record<number, DetectionResult>>({});
   const [isUpdatingConfig, setIsUpdatingConfig] = useState(false);
+  const [revenueStats, setRevenueStats] = useState({ today: 0, month: 0, visitors_today: 0 });
+  const [revenueHistory, setRevenueHistory] = useState<any[]>([]);
+  const [revenueChart, setRevenueChart] = useState<any[]>([]);
+  // Visitor alert (xe khách vãng lai cần thu phí)
+  const [visitorAlert, setVisitorAlert] = useState<{ plate: string; image: string; gate_id: number } | null>(null);
+  const [visitorFee, setVisitorFee] = useState(20000);
+  const [payingVisitor, setPayingVisitor] = useState(false);
+  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -115,6 +128,40 @@ export default function App() {
     } catch {
       setApiStatus('offline');
     }
+  }, []);
+
+  // Toast helper
+  const showToast = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  // Handle visitor payment
+  const handleVisitorPay = useCallback(async () => {
+    if (!visitorAlert) return;
+    setPayingVisitor(true);
+    try {
+      const res = await apiFetch<{ success: boolean; so_tien: number }>('/visitor/pay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bien_so_xe: visitorAlert.plate, gate_id: visitorAlert.gate_id }),
+      });
+      if (res.success) {
+        showToast(`✅ Đã thu ${res.so_tien.toLocaleString()}đ — Mở cổng vào!`);
+        setVisitorAlert(null);
+        fetchRevenueData();
+        loadLogs();
+      }
+    } catch (e: any) {
+      showToast('❌ Lỗi thu phí: ' + e.message, 'error');
+    } finally {
+      setPayingVisitor(false);
+    }
+  }, [visitorAlert, showToast]);
+
+  // Load visitor fee from server on mount
+  useEffect(() => {
+    apiFetch<{ visitor_fee: number }>('/config/fees').then(d => setVisitorFee(d.visitor_fee)).catch(() => {});
   }, []);
 
   // ── Load stats ────────────────────────────────────────────────────────────
@@ -154,6 +201,11 @@ export default function App() {
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
+
+        // 0. Visitor alert — xe khách tại cổng vào cần thu phí
+        if (msg.visitor_alert && msg.gate_id === 1 && msg.plate) {
+          setVisitorAlert({ plate: msg.plate, image: msg.image || '', gate_id: 1 });
+        }
         
         // 1. Nhận diện biển số
         if (msg.processed && msg.gate_id) {
@@ -161,6 +213,13 @@ export default function App() {
           setLatestDetection(msg);
           loadLogs();
           loadStats();
+        }
+
+        // visitor_paid — bảo vệ vừa xác nhận thu phí
+        if (msg.type === 'visitor_paid') {
+          setVisitorAlert(null);
+          loadLogs();
+          fetchRevenueData();
         }
         
         // 2. Trạng thái cảm biến & Ô đỗ (Từ Hardware API broadcast)
@@ -250,17 +309,34 @@ export default function App() {
   }, [activeTab, apiStatus, isProcessing]);
 
   // ── Initial data load ─────────────────────────────────────────────────────
+  const fetchRevenueData = async () => {
+    try {
+      const stats = await apiFetch('/revenue/stats');
+      setRevenueStats(stats);
+      const history = await apiFetch('/revenue/history?limit=30');
+      setRevenueHistory(history);
+      const chart = await apiFetch('/revenue/chart');
+      setRevenueChart(chart);
+    } catch (err) {
+      console.error("Lỗi fetch revenue:", err);
+    }
+  };
+
   useEffect(() => {
     checkHealth();
     loadStats();
     loadLogs();
+    loadResidents();
     setupWebSocket();
+    if (activeTab === 'revenue') {
+      fetchRevenueData();
+    }
     const statInterval = setInterval(() => { loadStats(); checkHealth(); }, 10_000);
     return () => {
       clearInterval(statInterval);
       wsRef.current?.close();
     };
-  }, [checkHealth, loadStats, loadLogs, setupWebSocket]);
+  }, [checkHealth, loadStats, loadLogs, setupWebSocket, activeTab]);
 
   useEffect(() => {
     if (activeTab === 'history') loadLogs(logFilter);
@@ -290,10 +366,11 @@ export default function App() {
       await apiFetch('/config/system', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gate1_ip: gate1Ip, gate2_ip: gate2Ip }),
+        body: JSON.stringify({ gate1_ip: gate1Ip, gate2_ip: gate2Ip, com_port: comPort }),
       });
       localStorage.setItem('smartpark_gate1_ip', gate1Ip);
       localStorage.setItem('smartpark_gate2_ip', gate2Ip);
+      localStorage.setItem('smartpark_com_port', comPort);
       alert("Đã lưu cấu hình Hệ thống V2 thành công!");
     } catch (err: any) {
       alert("Lỗi khi lưu cấu hình: " + err.message);
@@ -326,7 +403,7 @@ export default function App() {
           body: JSON.stringify(newResident),
         });
       }
-      setNewResident({ id: null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', anh_dang_ky: '' });
+      setNewResident({ id: null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', so_dien_thoai: '', da_thanh_toan: false, anh_dang_ky: '' });
       loadResidents();
     } catch (e: any) {
       setAddError(e.message);
@@ -341,9 +418,27 @@ export default function App() {
       bien_so_xe: r.bien_so_xe, 
       ten_chu_xe: r.ten_chu_xe, 
       so_can_ho: r.so_can_ho,
+      so_dien_thoai: r.so_dien_thoai || '',
+      da_thanh_toan: r.da_thanh_toan,
       anh_dang_ky: r.anh_dang_ky || '' 
     });
     setAddError('');
+  };
+
+  const handleTogglePayment = async (id: number) => {
+    try {
+      const res = await apiFetch<{success: boolean, da_thanh_toan: boolean}>(`/residents/${id}/toggle_payment`, { method: 'POST' });
+      if (res.success) {
+        setResidents(prev => prev.map(r => r.id === id ? { ...r, da_thanh_toan: res.da_thanh_toan } : r));
+        if (selectedResident && selectedResident.id === id) {
+          setSelectedResident(prev => prev ? { ...prev, da_thanh_toan: res.da_thanh_toan } : null);
+        }
+        // Tự động cập nhật lại dashboard doanh thu ngay lập tức
+        fetchRevenueData();
+      }
+    } catch (e) {
+      console.error("Toggle payment failed:", e);
+    }
   };
 
   const handleScanResidentPlate = async () => {
@@ -425,9 +520,8 @@ export default function App() {
           <NavItem icon={<LayoutDashboard size={19} />} label="Hệ Thống" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
           <NavItem icon={<Activity size={19} />} label="Lịch Sử Ra Vào" active={activeTab === 'history'} onClick={() => setActiveTab('history')} />
           <NavItem icon={<Users size={19} />} label="Cư Dân" active={activeTab === 'residents'} onClick={() => setActiveTab('residents')} />
+          <NavItem icon={<TrendingUp size={19} />} label="Doanh Thu" active={activeTab === 'revenue'} onClick={() => setActiveTab('revenue')} />
           <NavItem icon={<Settings size={19} />} label="Cài Đặt" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
-          
-          {/* Hardware section removed per user request */}
         </nav>
 
         {/* API Status */}
@@ -450,6 +544,7 @@ export default function App() {
             {activeTab === 'dashboard' && 'Giám sát Trực tiếp'}
             {activeTab === 'history' && 'Lịch sử Ra Vào'}
             {activeTab === 'residents' && 'Quản lý Cư dân'}
+            {activeTab === 'revenue' && 'Doanh thu'}
             {activeTab === 'settings' && 'Cài đặt Hệ thống'}
           </h2>
           <div className="flex items-center gap-3">
@@ -471,7 +566,38 @@ export default function App() {
           {/* ══════════ DASHBOARD (HỆ THỐNG) ══════════ */}
           {activeTab === 'dashboard' && (
             <div className="flex flex-col gap-6 h-full overflow-y-auto pr-2 custom-scrollbar">
-              
+
+              {/* ══ VISITOR ALERT BANNER ══ */}
+              {visitorAlert && (
+                <div className="shrink-0 flex items-center gap-5 p-5 rounded-[2rem] bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-2xl shadow-amber-200 border border-amber-400/30 animate-in slide-in-from-top-4 duration-500">
+                  {visitorAlert.image && (
+                    <img src={visitorAlert.image} className="w-24 h-14 object-cover rounded-2xl border-2 border-white/30 shrink-0" alt={visitorAlert.plate} />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/70 mb-1">Xe khách — Chờ thu phí</p>
+                    <p className="text-2xl font-black font-mono tracking-widest">{visitorAlert.plate}</p>
+                    <p className="text-xs font-bold text-white/80 mt-0.5">Phí vào bãi: {visitorFee.toLocaleString()} VNĐ/lượt</p>
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      onClick={handleVisitorPay}
+                      disabled={payingVisitor}
+                      className="flex items-center gap-2 bg-white text-amber-600 px-5 py-3 rounded-2xl font-black text-sm hover:bg-amber-50 transition-all shadow-lg active:scale-95 disabled:opacity-60"
+                    >
+                      {payingVisitor ? <RefreshCw size={16} className="animate-spin" /> : <Banknote size={16} />}
+                      Thu {visitorFee.toLocaleString()}đ & Mở cổng
+                    </button>
+                    <button
+                      onClick={() => setVisitorAlert(null)}
+                      className="p-3 bg-white/20 hover:bg-white/30 rounded-2xl transition-all"
+                      title="Từ chối"
+                    >
+                      <XCircle size={18} />
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* V4 ROW 1: TOP STATS BAR */}
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 shrink-0">
                 <StatCard title="Trong bãi" value={stats.inside} icon={<Car size={22} />} color="indigo" />
@@ -504,11 +630,8 @@ export default function App() {
                   <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar bg-slate-50/30">
                     {logs.length > 0 ? (
                       logs.slice(0, 15).map((log, index) => (
-                        <motion.div 
+                        <div 
                           key={log.id}
-                          initial={{ opacity: 0, x: -50 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          transition={{ delay: index * 0.05, type: 'spring', stiffness: 100 }}
                           className="flex items-center gap-6 p-5 rounded-[2rem] bg-white border border-slate-100 shadow-sm hover:shadow-md hover:border-indigo-200 transition-all cursor-default group"
                         >
                           <div className="w-24 h-14 bg-slate-900 rounded-2xl overflow-hidden border-2 border-slate-100 shrink-0 group-hover:border-indigo-200 transition-colors">
@@ -540,7 +663,7 @@ export default function App() {
                                 </p>
                             </div>
                           </div>
-                        </motion.div>
+                        </div>
                       ))
                     ) : (
                       <div className="h-full flex flex-col items-center justify-center text-slate-300 py-20">
@@ -681,6 +804,26 @@ export default function App() {
                     </h3>
                     <div className="grid grid-cols-2 gap-3 mb-3">
                       <div>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1">Họ tên chủ xe *</label>
+                        <input
+                          type="text"
+                          placeholder="Họ tên đầy đủ"
+                          value={newResident.ten_chu_xe}
+                          onChange={e => setNewResident(p => ({ ...p, ten_chu_xe: e.target.value }))}
+                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1">Số điện thoại</label>
+                        <input
+                          type="text"
+                          placeholder="09xx..."
+                          value={newResident.so_dien_thoai}
+                          onChange={e => setNewResident(p => ({ ...p, so_dien_thoai: e.target.value }))}
+                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                        />
+                      </div>
+                      <div>
                         <label className="block text-xs font-semibold text-slate-600 mb-1">Biển số xe *</label>
                         <input
                           type="text"
@@ -691,22 +834,22 @@ export default function App() {
                         />
                       </div>
                       <div>
-                        <label className="block text-xs font-semibold text-slate-600 mb-1">Tên chủ xe *</label>
-                        <input
-                          type="text"
-                          placeholder="Họ tên đầy đủ"
-                          value={newResident.ten_chu_xe}
-                          onChange={e => setNewResident(p => ({ ...p, ten_chu_xe: e.target.value }))}
-                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-                        />
-                      </div>
-                      <div className="col-span-2">
                         <label className="block text-xs font-semibold text-slate-600 mb-1">Số căn hộ</label>
                         <input
                           type="text"
                           placeholder="VD: A1-01"
                           value={newResident.so_can_ho}
                           onChange={e => setNewResident(p => ({ ...p, so_can_ho: e.target.value }))}
+                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1">Phí gửi tháng (VNĐ)</label>
+                        <input
+                          type="number"
+                          placeholder="500000"
+                          value={newResident.phi_thang}
+                          onChange={e => setNewResident(p => ({ ...p, phi_thang: parseInt(e.target.value) || 0 }))}
                           className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
                         />
                       </div>
@@ -724,7 +867,7 @@ export default function App() {
                       
                       {newResident.id && (
                         <button
-                          onClick={() => setNewResident({ id: null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', anh_dang_ky: '' })}
+                          onClick={() => setNewResident({ id: null, bien_so_xe: '', ten_chu_xe: '', so_can_ho: '', so_dien_thoai: '', da_thanh_toan: false, anh_dang_ky: '', phi_thang: 0 })}
                           className="text-slate-500 hover:bg-slate-100 px-4 py-2.5 rounded-xl text-xs font-bold transition-all"
                         >
                           Hủy bỏ
@@ -788,9 +931,9 @@ export default function App() {
                   <table className="w-full text-sm">
                     <thead className="border-b border-slate-100 sticky top-0 bg-white/95 backdrop-blur-md">
                       <tr className="text-slate-400 text-[10px] uppercase tracking-widest font-bold">
-                        <th className="px-6 py-3 text-left">Biển số</th>
-                        <th className="px-6 py-3 text-left">Chủ xe</th>
-                        <th className="px-6 py-3 text-left">Căn hộ</th>
+                        <th className="px-6 py-3 text-left">Chủ xe / SĐT</th>
+                        <th className="px-6 py-3 text-left">Biển số / Căn hộ</th>
+                        <th className="px-6 py-3 text-center">Phí tháng</th>
                         <th className="px-6 py-3 text-right pr-12">Đăng ký</th>
                         <th className="px-6 py-3 text-right">Hành động</th>
                       </tr>
@@ -798,14 +941,29 @@ export default function App() {
                     <tbody className="divide-y divide-slate-50">
                       {residents.map(r => (
                         <tr key={r.id} className="hover:bg-slate-50 transition-colors group">
-                          <td className="px-6 py-4 font-mono font-bold text-slate-900">
-                             <span className="bg-slate-100 px-2 py-1 rounded border border-slate-200">{r.bien_so_xe}</span>
+                          <td className="px-6 py-4 cursor-pointer" onClick={() => setSelectedResident(r)}>
+                             <p className="text-slate-900 font-bold group-hover:text-indigo-600 transition-colors">{r.ten_chu_xe}</p>
+                             <p className="text-[10px] font-bold text-slate-400">{r.so_dien_thoai || 'Chưa cập nhật SĐT'}</p>
                           </td>
-                          <td className="px-6 py-4 text-slate-700 font-bold">{r.ten_chu_xe}</td>
-                          <td className="px-6 py-4 text-slate-500 font-medium">{r.so_can_ho || '—'}</td>
+                          <td className="px-6 py-4">
+                             <span className="font-mono font-bold text-slate-800 bg-slate-100 px-2 py-1 rounded border border-slate-200 mr-2">{r.bien_so_xe}</span>
+                             <span className="text-xs font-bold text-slate-500">{r.so_can_ho || '—'}</span>
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            <div className="flex flex-col items-center">
+                              <span onClick={(e) => { e.stopPropagation(); handleTogglePayment(r.id); }} className={`cursor-pointer inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest shadow-sm mb-1 ${
+                                  r.da_thanh_toan ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-red-100 text-red-700 hover:bg-red-200'
+                              }`}>
+                                  {r.da_thanh_toan ? <CheckCircle2 size={10} /> : <XCircle size={10} />}
+                                  {r.da_thanh_toan ? 'Đã Đóng' : 'Nợ Phí'}
+                              </span>
+                              <span className="text-[10px] font-bold text-slate-400">{(r.phi_thang || 500000).toLocaleString()} VNĐ</span>
+                            </div>
+                          </td>
                           <td className="px-6 py-4 text-right pr-12">
                             {r.anh_dang_ky ? (
                               <img 
+                                onClick={(e) => { e.stopPropagation(); setSelectedResident(r); }}
                                 src={`data:image/jpeg;base64,${r.anh_dang_ky}`} 
                                 className="inline-block w-10 h-6 object-cover rounded shadow-sm border border-slate-100 hover:scale-[3] transition-transform origin-right z-10 relative cursor-zoom-in" 
                               />
@@ -816,14 +974,14 @@ export default function App() {
                           <td className="px-6 py-4 text-right">
                             <div className="flex justify-end gap-1">
                                 <button
-                                    onClick={() => startEditResident(r)}
+                                    onClick={(e) => { e.stopPropagation(); startEditResident(r); }}
                                     className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
                                     title="Sửa thông tin"
                                 >
                                     <RefreshCw size={14} />
                                 </button>
                                 <button
-                                    onClick={() => handleDeleteResident(r.id)}
+                                    onClick={(e) => { e.stopPropagation(); handleDeleteResident(r.id); }}
                                     className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
                                     title="Xóa cư dân"
                                 >
@@ -846,6 +1004,7 @@ export default function App() {
               </div>
             </div>
           )}
+
 
           {/* ══════════ SETTINGS ══════════ */}
           {activeTab === 'settings' && (
@@ -878,6 +1037,16 @@ export default function App() {
                         value={gate2Ip} 
                         onChange={e => setGate2Ip(e.target.value)}
                         className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">Cổng COM (Arduino)</label>
+                      <input 
+                        type="text" 
+                        value={comPort} 
+                        onChange={e => setComPort(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all font-mono text-indigo-600 font-bold"
+                        placeholder="VD: COM3"
                       />
                     </div>
                   </div>
@@ -919,26 +1088,319 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex justify-end">
-                <button 
-                  onClick={saveSystemConfig}
-                  disabled={isUpdatingConfig}
-                  className="flex items-center gap-2 bg-indigo-600 text-white px-6 py-3 rounded-2xl text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-95 disabled:opacity-50"
-                >
-                  {isUpdatingConfig ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
-                  Lưu cấu hình
-                </button>
+              <div className="flex justify-end gap-3">
+                <div className="flex-1 max-w-xs">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">Phí khách vãng lai (VNĐ/lượt)</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      value={visitorFee}
+                      onChange={e => setVisitorFee(parseInt(e.target.value) || 0)}
+                      className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-amber-100 focus:border-amber-400 transition-all font-mono font-bold text-amber-600"
+                    />
+                    <button
+                      onClick={async () => {
+                        try {
+                          await apiFetch('/config/fees', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ visitor_fee: visitorFee }) });
+                          showToast('✅ Đã cập nhật phí khách');
+                        } catch { showToast('❌ Lỗi cập nhật', 'error'); }
+                      }}
+                      className="px-4 py-2.5 bg-amber-500 text-white rounded-xl text-xs font-bold hover:bg-amber-600 transition-all"
+                    >Lưu</button>
+                  </div>
+                </div>
+                <div className="flex items-end">
+                  <button 
+                    onClick={saveSystemConfig}
+                    disabled={isUpdatingConfig}
+                    className="flex items-center gap-2 bg-indigo-600 text-white px-6 py-3 rounded-2xl text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-95 disabled:opacity-50"
+                  >
+                    {isUpdatingConfig ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
+                    Lưu cấu hình
+                  </button>
+                </div>
               </div>
             </div>
           )}
 
+          {/* ══════════ REVENUE (DOANH THU) ══════════ */}
+          {activeTab === 'revenue' && (
+            <RevenueView
+              stats={revenueStats}
+              history={revenueHistory}
+              chart={revenueChart}
+              onRefresh={fetchRevenueData}
+              visitorFee={visitorFee}
+            />
+          )}
+
+          {/* Toast Notification */}
+          {toast && (
+            <div className={`fixed bottom-6 right-6 z-[200] flex items-center gap-3 px-5 py-3.5 rounded-2xl shadow-2xl text-sm font-bold text-white animate-in slide-in-from-bottom-4 duration-300 ${
+              toast.type === 'success' ? 'bg-emerald-600' : 'bg-red-600'
+            }`}>
+              {toast.msg}
+            </div>
+          )}
         </div>
       </main>
+
+      {/* ══════════ RESIDENT PROFILE MODAL ══════════ */}
+      <AnimatePresence>
+        {selectedResident && (
+            <div 
+                className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+                onClick={() => setSelectedResident(null)}
+            >
+                <div 
+                    className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-4xl overflow-hidden border border-slate-100 flex h-[500px]"
+                    onClick={e => e.stopPropagation()}
+                >
+                    {/* LEFT SIDE: Info */}
+                    <div className="w-2/5 flex flex-col border-r border-slate-100 bg-slate-50/30">
+                        {/* Modal Header/Top Cover */}
+                        <div className="h-32 bg-indigo-600 relative shrink-0">
+                            <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 to-purple-700 opacity-90" />
+                            <div className="absolute -bottom-10 left-6 p-1 bg-white rounded-2xl shadow-xl">
+                                <div className="w-20 h-20 bg-slate-100 rounded-xl overflow-hidden border-2 border-slate-50 flex items-center justify-center">
+                                    {selectedResident.anh_dang_ky ? (
+                                        <img src={`data:image/jpeg;base64,${selectedResident.anh_dang_ky}`} className="w-full h-full object-cover" />
+                                    ) : (
+                                        <Car size={32} className="text-slate-300" />
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="pt-12 px-6 flex-1 flex flex-col justify-between pb-6">
+                            <div>
+                                <div className="mb-6">
+                                    <h2 className="text-xl font-black text-slate-800 leading-tight">{selectedResident.ten_chu_xe}</h2>
+                                    <p className="text-indigo-600 text-sm font-black font-mono tracking-wider">{selectedResident.bien_so_xe}</p>
+                                    
+                                    <div className="mt-3">
+                                        <span className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest flex items-center gap-2 w-fit ${
+                                            selectedResident.da_thanh_toan ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-red-50 text-red-600 border border-red-100'
+                                        }`}>
+                                            <div className={`w-1.5 h-1.5 rounded-full ${selectedResident.da_thanh_toan ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'}`} />
+                                            {selectedResident.da_thanh_toan ? 'Đã đóng phí' : 'Nợ phí tháng'}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-4">
+                                    <div className="space-y-1">
+                                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Căn hộ</p>
+                                        <div className="flex items-center gap-2 text-slate-700">
+                                            <LayoutGrid size={14} className="text-slate-300" />
+                                            <span className="text-sm font-bold">{selectedResident.so_can_ho || 'N/A'}</span>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Phí tháng</p>
+                                        <div className="flex items-center gap-2 text-slate-700">
+                                            <Banknote size={14} className="text-slate-300" />
+                                            <span className="text-sm font-bold text-emerald-600">{(selectedResident.phi_thang || 500000).toLocaleString()} VNĐ</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="flex gap-2 mt-8">
+                                <button 
+                                    onClick={() => handleTogglePayment(selectedResident.id)}
+                                    className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-black text-xs transition-all shadow-lg active:scale-95 ${
+                                        selectedResident.da_thanh_toan 
+                                        ? 'bg-slate-200 text-slate-600 hover:bg-slate-300' 
+                                        : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-100'
+                                    }`}
+                                >
+                                    <CheckCircle2 size={16} />
+                                    {selectedResident.da_thanh_toan ? 'Hủy thu' : 'Thu phí'}
+                                </button>
+                                <button 
+                                    onClick={() => { startEditResident(selectedResident); setSelectedResident(null); }}
+                                    className="p-3 rounded-xl bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-all active:scale-95"
+                                >
+                                    <Edit size={16} />
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* RIGHT SIDE: Large Image */}
+                    <div className="w-3/5 bg-slate-900 relative group flex items-center justify-center">
+                        {selectedResident.anh_dang_ky ? (
+                            <img src={`data:image/jpeg;base64,${selectedResident.anh_dang_ky}`} className="w-full h-full object-contain" />
+                        ) : (
+                            <div className="text-center">
+                                <Activity size={48} className="text-slate-700 mx-auto mb-4 opacity-20" />
+                                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Không có ảnh đăng ký</p>
+                            </div>
+                        )}
+                        <div className="absolute top-6 left-6 px-3 py-1.5 bg-black/40 backdrop-blur-md rounded-xl border border-white/10 text-[9px] text-white font-black uppercase tracking-widest">
+                            HÌNH ẢNH BIỂN SỐ GHI NHẬN
+                        </div>
+                        <button 
+                            onClick={() => setSelectedResident(null)}
+                            className="absolute top-6 right-6 bg-white/10 hover:bg-white/20 backdrop-blur-md p-2 rounded-full text-white transition-all border border-white/10"
+                        >
+                            <XCircle size={20} />
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
+
+const RevenueView = ({ stats, history, chart, onRefresh }: any) => {
+  return (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h2 className="text-2xl font-black text-slate-800 tracking-tight">Thống Kê Doanh Thu</h2>
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Quản lý dòng tiền cư dân</p>
+        </div>
+        <button 
+          onClick={onRefresh}
+          className="p-3 bg-white border border-slate-100 rounded-2xl text-slate-500 hover:text-indigo-600 hover:border-indigo-100 transition-all shadow-sm"
+        >
+          <RefreshCw size={18} />
+        </button>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm relative overflow-hidden group">
+          <div className="absolute top-0 right-0 p-8 opacity-[0.03] group-hover:scale-110 transition-transform duration-700">
+            <Banknote size={80} />
+          </div>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.15em] mb-2">Phí thu hôm nay</p>
+          <h3 className="text-3xl font-black text-slate-800 tracking-tight">
+            {stats.today.toLocaleString()} <span className="text-sm font-bold text-slate-400">VNĐ</span>
+          </h3>
+          <div className="mt-4 flex items-center gap-2 text-emerald-600 text-xs font-bold">
+            <TrendingUp size={14} />
+            <span>Thu phí tháng cư dân</span>
+          </div>
+        </div>
+
+        <div className="bg-indigo-600 p-6 rounded-[2.5rem] shadow-xl shadow-indigo-100 relative overflow-hidden group">
+          <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform duration-700 text-white">
+            <Calendar size={80} />
+          </div>
+          <p className="text-[10px] font-black text-white/60 uppercase tracking-[0.15em] mb-2">Doanh thu tháng này</p>
+          <h3 className="text-3xl font-black text-white tracking-tight">
+            {stats.month.toLocaleString()} <span className="text-sm font-bold text-white/60">VNĐ</span>
+          </h3>
+          <div className="mt-4 px-3 py-1 bg-white/10 rounded-full w-fit text-[10px] text-white font-bold">
+            Cập nhật thời gian thực
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm relative overflow-hidden group">
+          <div className="absolute top-0 right-0 p-8 opacity-[0.03] group-hover:scale-110 transition-transform duration-700">
+            <Users size={80} />
+          </div>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.15em] mb-2">Lượt khách thăm hôm nay</p>
+          <h3 className="text-3xl font-black text-slate-800 tracking-tight">
+            {stats.visitors_today} <span className="text-sm font-bold text-slate-400">Lượt</span>
+          </h3>
+          <div className="mt-4 flex items-center gap-2 text-indigo-600 text-xs font-bold">
+            <Car size={14} />
+            <span>Ghi nhận xe ngoài vào bãi</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        {/* Chart */}
+        <div className="lg:col-span-3 bg-white p-8 rounded-[3rem] border border-slate-100 shadow-sm">
+          <div className="flex items-center justify-between mb-8">
+            <h4 className="font-black text-slate-800 tracking-tight">Xu hướng thu phí (7 ngày)</h4>
+            <div className="flex items-center gap-4 text-[10px] font-bold text-slate-400">
+              <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-indigo-500" /> Doanh thu</div>
+            </div>
+          </div>
+          
+          <div className="h-64 flex items-end justify-between gap-4 px-2">
+            {chart.map((item: any, i: number) => {
+              const maxVal = Math.max(...chart.map((d: any) => d.total), 1);
+              const height = (item.total / maxVal) * 100;
+              return (
+                <div key={i} className="flex-1 flex flex-col items-center group gap-3">
+                  <div className="w-full relative flex items-end justify-center">
+                    <div 
+                      className="w-full max-w-[40px] bg-slate-100 rounded-t-2xl group-hover:bg-indigo-50 transition-colors duration-300 absolute bottom-0" 
+                      style={{ height: '100px', opacity: 0.3 }}
+                    />
+                    <motion.div 
+                      initial={{ height: 0 }}
+                      animate={{ height: `${height}%` }}
+                      transition={{ delay: i * 0.1, duration: 1, ease: "easeOut" }}
+                      className="w-full max-w-[40px] bg-gradient-to-t from-indigo-500 to-indigo-400 rounded-t-2xl shadow-lg shadow-indigo-100 relative z-10"
+                    />
+                  </div>
+                  <span className="text-[10px] font-black text-slate-400 group-hover:text-indigo-600 transition-colors">{item.day}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Recent Transactions */}
+        <div className="lg:col-span-2 bg-white rounded-[3rem] border border-slate-100 shadow-sm overflow-hidden flex flex-col">
+          <div className="p-6 border-b border-slate-50">
+            <h4 className="font-black text-slate-800 tracking-tight">Lịch sử thu phí</h4>
+          </div>
+          <div className="flex-1 overflow-y-auto max-h-[400px]">
+            {history.length === 0 ? (
+              <div className="p-12 text-center">
+                <p className="text-xs font-bold text-slate-400">Chưa có giao dịch nào</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-50">
+                {history.map((tx: any) => (
+                  <div key={tx.id} className="p-4 flex items-center justify-between hover:bg-slate-50/50 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className={`p-2 rounded-xl scale-90 ${tx.loai_phi === 'VISITOR' ? 'bg-blue-50 text-blue-600' : 'bg-emerald-50 text-emerald-600'}`}>
+                        {tx.loai_phi === 'VISITOR' ? <Car size={18} /> : <Users size={18} />}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          <p className="text-xs font-black text-slate-800 leading-none">
+                            {tx.loai_phi === 'VISITOR' ? 'Khách vãng lai' : (tx.ten_chu_xe || 'Cư dân')}
+                          </p>
+                          <span className={`text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-full ${
+                            tx.loai_phi === 'VISITOR' ? 'bg-blue-100 text-blue-600' : 'bg-emerald-100 text-emerald-700'
+                          }`}>
+                            {tx.loai_phi === 'VISITOR' ? 'Vãng lai' : 'Tháng'}
+                          </span>
+                        </div>
+                        <p className="text-[9px] font-bold text-slate-400 tracking-wider">
+                          {tx.bien_so_xe} • {new Date(tx.ngay_thanh_toan).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' })}
+                        </p>
+                      </div>
+                    </div>
+                    <p className={`text-xs font-black ${tx.loai_phi === 'VISITOR' ? 'text-blue-600' : 'text-emerald-600'}`}>
+                      +{tx.so_tien.toLocaleString()}đ
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {
   return (
