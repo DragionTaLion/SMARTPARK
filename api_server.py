@@ -23,6 +23,7 @@ import sys
 import time
 import traceback
 import json
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -53,6 +54,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 # ─── Cấu hình ──────────────────────────────────────────────────────────────
 MODEL_PATH = "data/models/plate_detect.pt"
 CHAR_MODEL_PATH = "data/models/char_model/weights/best.pt"
+# ═══════════════════════════════════════════════════════════════════════════
+#  CẤU HÌNH DATABASE & ĐỒNG BỘ GIT-SYNC
+# ═══════════════════════════════════════════════════════════════════════════
 DB_CONFIG = {
     "host": "localhost",
     "port": 55432,
@@ -60,11 +64,60 @@ DB_CONFIG = {
     "user": "postgres",
     "password": "postgres",
 }
-PARKING_CAPACITY = 50
+
+RESIDENTS_SYNC_FILE = os.path.join("data", "residents_sync.json")
+
+def export_residents_to_json():
+    """Xuất danh sách cư dân ra file JSON để đồng bộ qua Git."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT bien_so_xe, ten_chu_xe, so_can_ho, anh_dang_ky, so_dien_thoai, da_thanh_toan, phi_thang FROM cudan")
+                rows = cur.fetchall()
+                # Chuyển đổi RealDictRow hoặc dict thành list dict thuần túy
+                residents = [dict(r) for r in rows]
+                
+                os.makedirs(os.path.dirname(RESIDENTS_SYNC_FILE), exist_ok=True)
+                with open(RESIDENTS_SYNC_FILE, "w", encoding="utf-8") as f:
+                    json.dump(residents, f, ensure_ascii=False, indent=4)
+                print(f"[SYNC] Đã sao lưu {len(residents)} cư dân vào {RESIDENTS_SYNC_FILE}")
+    except Exception as e:
+        print(f"[SYNC] Lỗi sao lưu cư dân: {e}")
+
+def import_residents_from_json():
+    """Nạp cư dân từ file JSON vào DB nếu DB đang trống."""
+    if not os.path.exists(RESIDENTS_SYNC_FILE):
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) as count FROM cudan")
+                if cur.fetchone()["count"] > 0:
+                    return # Đã có dữ liệu, không ghi đè
+                
+                with open(RESIDENTS_SYNC_FILE, "r", encoding="utf-8") as f:
+                    residents = json.load(f)
+                
+                if not residents:
+                    return
+                
+                print(f"[SYNC] Phát hiện file đồng bộ. Đang nạp {len(residents)} cư dân vào máy mới...")
+                for r in residents:
+                    cur.execute(
+                        """INSERT INTO cudan (bien_so_xe, ten_chu_xe, so_can_ho, anh_dang_ky, so_dien_thoai, da_thanh_toan, phi_thang) 
+                           VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (bien_so_xe) DO NOTHING""",
+                        (r["bien_so_xe"], r["ten_chu_xe"], r["so_can_ho"], r["anh_dang_ky"], r["so_dien_thoai"], r["da_thanh_toan"], r.get("phi_thang", 500000))
+                    )
+                conn.commit()
+                print("[SYNC] Nạp cư dân thành công!")
+    except Exception as e:
+        print(f"[SYNC] Lỗi nạp cư dân: {e}")
+PARKING_CAPACITY = 3
 COOLDOWN_SECONDS = 5
 CONFIDENCE_THRESHOLD = 0.3
 MONTHLY_FEE = 500000
-VISITOR_FEE = 20000  # VNĐ/lượt — mặc định phí khách vãng lai
+VISITOR_FLAT_FEE = 20000 # 20k/lượt
+FREE_MINUTES = 30         # Miễn phí 30p đầu
 
 # ─── State toàn cục ────────────────────────────────────────────────────────
 class GateState:
@@ -87,7 +140,7 @@ class AppState:
         
         # AI Models
         self.yolo_model = None
-        self.easyocr_reader = None
+        self.char_model = None
         self.use_cuda: bool = False
         
         # System
@@ -95,6 +148,8 @@ class AppState:
         self.active_connections: List[WebSocket] = []
         self.ser: Optional[serial.Serial] = None
         self.com_port: str = "COM3"
+        self.esp8266_ip: str = "192.168.0.105"
+        self.camera_mode: str = "esp32"
         
         # Cooldown per plate
         self.last_plate_time: dict = {}
@@ -117,9 +172,9 @@ def load_config():
                     state.gates[1].ip = conf["gate1_ip"]
                 if "gate2_ip" in conf:
                     state.gates[2].ip = conf["gate2_ip"]
-                if "com_port" in conf:
-                    state.com_port = conf["com_port"]
-                print(f"[CONFIG] Đã tải cấu hình: Gate1={state.gates[1].ip}, Gate2={state.gates[2].ip}, COM={state.com_port}")
+                if "esp8266_ip" in conf:
+                    state.esp8266_ip = conf["esp8266_ip"]
+                print(f"[CONFIG] Đã tải cấu hình: Gate1={state.gates[1].ip}, Gate2={state.gates[2].ip}, ESP={state.esp8266_ip}")
         except Exception as e:
             print(f"[CONFIG] Lỗi load config: {e}")
 
@@ -129,7 +184,7 @@ def save_config():
             json.dump({
                 "gate1_ip": state.gates[1].ip,
                 "gate2_ip": state.gates[2].ip,
-                "com_port": state.com_port
+                "esp8266_ip": state.esp8266_ip
             }, f)
         print("[CONFIG] Đã lưu cấu hình hệ thống.")
     except Exception as e:
@@ -189,15 +244,9 @@ async def lifespan(app: FastAPI):
     except ImportError:
         print("  ⚠️ PyTorch không tìm thấy")
 
-    # Khởi tạo kết nối Hardware (Arduino/Barrier)
-    print(f"\n  [0/2] Đang kết nối phần cứng (Port: {state.com_port})...")
-    try:
-        import serial
-        state.ser = serial.Serial(state.com_port, 9600, timeout=1)
-        print(f"  ✅ Đã kết nối Arduino tại {state.com_port}")
-    except Exception as e:
-        print(f"  ⚠️ Không thể kết nối Arduino: {e}. Chạy chế độ mô phỏng.")
-
+    # Đã chuyển sang dùng IP (ESP8266), bỏ qua Serial
+    print("\n  [0/2] Chế độ điều khiển: IP (Wireless)...")
+    
     # Load YOLO model
     print(f"\n  [1/2] Đang tải YOLO model: {MODEL_PATH}")
     if os.path.exists(MODEL_PATH):
@@ -212,14 +261,17 @@ async def lifespan(app: FastAPI):
     else:
         print(f"  ❌ Không tìm thấy model tại: {MODEL_PATH}")
 
-    # Khởi tạo EasyOCR
-    print("\n  [2/2] Đang khởi tạo EasyOCR...")
-    try:
-        from core.ocr import init_easyocr
-        state.easyocr_reader = init_easyocr()
-        print("  ✅ EasyOCR đã sẵn sàng")
-    except Exception as e:
-        print(f"  ❌ Lỗi EasyOCR: {e}")
+    # Load Character YOLO model (Stage 2)
+    print(f"  [2/2] Đang tải Character model: {CHAR_MODEL_PATH}")
+    if os.path.exists(CHAR_MODEL_PATH):
+        try:
+            state.char_model = YOLO(CHAR_MODEL_PATH)
+            state.char_model.to(device)
+            print(f"  ✅ Character model đã tải (device={device})")
+        except Exception as e:
+            print(f"  ❌ Lỗi tải Character model: {e}")
+    else:
+        print(f"  ❌ Không tìm thấy model tại: {CHAR_MODEL_PATH}")
 
     # Khởi chạy các luồng xử lý cho từng cổng (V2 Dual-Gate)
     for gate_id in state.gates.keys():
@@ -251,6 +303,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+def open_gate_http(gate_id: int):
+    """Gửi lệnh mở cổng qua HTTP tới ESP8266"""
+    if not state.esp8266_ip: 
+        print("[HARDWARE] Chưa cấu hình IP ESP8266")
+        return
+    
+    url = f"http://{state.esp8266_ip}/open?gate={gate_id}"
+    print(f"[HARDWARE] Đang gửi lệnh mở cổng {gate_id} tới {url}...")
+    
+    def send_request():
+        try:
+            import requests
+            requests.get(url, timeout=3)
+            print(f"  ✅ Đã gửi lệnh tới ESP8266 thành công.")
+        except Exception as e:
+            print(f"  ❌ Lỗi gửi lệnh tới ESP8266: {e}")
+            
+    threading.Thread(target=send_request, daemon=True).start()
 
 # ─── Helpers DB ────────────────────────────────────────────────────────────
 def get_conn():
@@ -297,20 +368,30 @@ def get_all_residents_for_fuzzy() -> list:
         return []
 
 
-def insert_history(plate: str, trang_thai: str, img_base64: Optional[str] = None, ten_chu_xe: Optional[str] = None) -> None:
+def insert_history(plate: str, trang_thai: str, img_base64: Optional[str] = None, ten_chu_xe: Optional[str] = None, gate_id: Optional[int] = None) -> None:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # Optimized insert to handle optional tenant name if database supports it
-                # Note: Currently assumes the table might have ten_chu_xe but falls back if not
+                # Thử thêm cột gate_id vào query nếu tồn tại (để tương lai mở rộng)
+                # Hiện tại chỉ focus vào sửa lỗi TypeError
+                # Lấy giờ Việt Nam (ICT) ở dạng Naive (để lưu chính xác 14:45 vào DB)
+                vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
                 insert_query = """
                     INSERT INTO lichsuravao (bien_so_xe, thoi_gian, trang_thai, anh_bien_so)
-                    VALUES (%s, NOW(), %s, %s)
+                    VALUES (%s, %s, %s, %s)
                 """
-                params = (normalize_plate(plate), trang_thai, img_base64)
+                params = (normalize_plate(plate), vn_now, trang_thai, img_base64)
                 
                 cur.execute(insert_query, params)
                 conn.commit()
+                
+                # Thông báo cho tất cả Clients làm mới Thống kê (Real-time)
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(broadcast_message({"type": "refresh_stats"}))
+                except Exception:
+                    pass
     except Exception as e:
         print(f"[DB] insert_history error: {e}")
 
@@ -352,16 +433,15 @@ def get_entry_image(plate: str) -> Optional[str]:
 
 
 def is_visitor_in_lot(plate: str) -> bool:
-    """Kiểm tra xe khách có đang trong bãi (đã trả tiền vào, chưa ra) không"""
+    """Kiểm tra xe khách có đang trong bãi không"""
     try:
         norm = normalize_plate(plate)
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # Đếm lượt Vao của khách trong 24h gần nhất
+                # Đếm lượt Vao của khách
                 cur.execute("""
                     SELECT COUNT(*) as cnt FROM lichsuravao
                     WHERE bien_so_xe = %s AND trang_thai = 'Vao'
-                    AND thoi_gian > NOW() - INTERVAL '24 hours'
                     AND bien_so_xe NOT IN (SELECT bien_so_xe FROM cudan)
                 """, (norm,))
                 vao_count = cur.fetchone()['cnt']
@@ -369,7 +449,6 @@ def is_visitor_in_lot(plate: str) -> bool:
                 cur.execute("""
                     SELECT COUNT(*) as cnt FROM lichsuravao
                     WHERE bien_so_xe = %s AND trang_thai = 'Ra'
-                    AND thoi_gian > NOW() - INTERVAL '24 hours'
                     AND bien_so_xe NOT IN (SELECT bien_so_xe FROM cudan)
                 """, (norm,))
                 ra_count = cur.fetchone()['cnt']
@@ -379,8 +458,25 @@ def is_visitor_in_lot(plate: str) -> bool:
         return False
 
 
+def get_visitor_last_entry(plate: str):
+    """Tìm thời gian vào gần nhất của xe vãng lai chưa có lượt ra"""
+    try:
+        norm = normalize_plate(plate)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT thoi_gian FROM lichsuravao
+                    WHERE bien_so_xe = %s AND trang_thai = 'Vao'
+                    ORDER BY thoi_gian DESC LIMIT 1
+                """, (norm,))
+                row = cur.fetchone()
+                return row['thoi_gian'] if row else None
+    except Exception:
+        return None
+
+
 # ─── Core: xử lý frame ─────────────────────────────────────────────────────
-def process_frame_core(frame: np.ndarray, demo_mode: bool = True) -> dict:
+def process_frame_core(frame: np.ndarray) -> dict:
     """
     Nhận numpy frame → YOLO detect → OCR → DB lookup → ghi lịch sử
     Trả về dict kết quả để gửi về frontend
@@ -521,12 +617,11 @@ def process_frame_core(frame: np.ndarray, demo_mode: bool = True) -> dict:
 
 
 # ─── WebSocket Manager ──────────────────────────────────────────────────────
-async def broadcast_detection(data: dict):
-    """Gửi kết quả nhận diện tới tất cả clients qua WebSocket"""
+async def broadcast_message(data: dict):
+    """Gửi một message bất kỳ tới tất cả clients qua WebSocket"""
     if not state.active_connections:
         return
     
-    # Convert image paths if any to absolute URLs or relative to static
     dead_connections = []
     for ws in state.active_connections:
         try:
@@ -537,6 +632,10 @@ async def broadcast_detection(data: dict):
     for ws in dead_connections:
         if ws in state.active_connections:
             state.active_connections.remove(ws)
+
+async def broadcast_detection(data: dict):
+    """Gửi kết quả nhận diện tới tất cả clients qua WebSocket"""
+    await broadcast_message(data)
 
 
 def open_barrier():
@@ -597,13 +696,45 @@ def detect_worker(gate_id: int):
             x2, y2 = min(w, x2), min(h, y2)
             crop = frame[y1:y2, x1:x2]
             
-            # 3. OCR (sử dụng EasyOCR)
+            # 3. Nhận diện ký tự (SỬ DỤNG AI THUẦN YOLO CHO STAGE 2)
             plate_text = ""
-            if state.easyocr_reader:
-                ocr_results = state.easyocr_reader.readtext(crop)
-                plate_text = "".join([res[1] for res in ocr_results]).upper()
-                plate_text = "".join([c for c in plate_text if c.isalnum()])
+            if state.char_model:
+                char_results = state.char_model.predict(crop, conf=0.4, verbose=False)
+                if len(char_results) > 0:
+                    chars = []
+                    for c_box in char_results[0].boxes:
+                        x1_c, y1_c, x2_c, y2_c = c_box.xyxy[0]
+                        cls_idx = int(c_box.cls[0])
+                        char_val = state.char_model.names[cls_idx]
+                        chars.append({
+                            'val': char_val,
+                            'x': (x1_c + x2_c) / 2,
+                            'y': (y1_c + y2_c) / 2
+                        })
+                    
+                    if chars:
+                        # THUẬT TOÁN SẮP XẾP KÝ TỰ THÔNG MINH (Hỗ trợ biển 1 dòng và 2 dòng)
+                        # Sắp xếp theo trục Y trước để phân dòng
+                        chars.sort(key=lambda c: c['y'])
+                        
+                        y_coords = [c['y'] for c in chars]
+                        min_y, max_y = min(y_coords), max(y_coords)
+                        
+                        # Nếu khoảng cách Y lớn hơn 1/4 chiều cao ảnh cắt thì khả năng là biển 2 dòng
+                        is_two_line = (max_y - min_y) > (crop.shape[0] / 4)
+                        
+                        if is_two_line:
+                            mid_y = (min_y + max_y) / 2
+                            line1 = [c for c in chars if c['y'] < mid_y]
+                            line2 = [c for c in chars if c['y'] >= mid_y]
+                            line1.sort(key=lambda c: c['x'])
+                            line2.sort(key=lambda c: c['x'])
+                            plate_text = "".join([c['val'] for c in line1]) + "".join([c['val'] for c in line2])
+                        else:
+                            chars.sort(key=lambda c: c['x'])
+                            plate_text = "".join([c['val'] for c in chars])
             
+            plate_text = plate_text.upper()
             if not plate_text or len(plate_text) < 4:
                 continue
 
@@ -626,20 +757,21 @@ def detect_worker(gate_id: int):
                 
                 # ── Xác định trạng thái dựa trên gate và loại xe ──
                 if gate_id == 1:
-                    # CỔNG VÀO: cư dân → Vao, khách → chờ bảo vệ xác nhận (visitor_alert)
-                    trang_thai = "Vao" if is_resident else "Tu choi"
+                    # CỔNG VÀO: cư dân → Vao, khách → Vao (ghi nhận thời điểm vào để tính tiền lúc ra)
+                    trang_thai = "Vao" if is_resident else "Vao" 
                 elif gate_id == 2:
-                    # CỔNG RA: cư dân → Ra, khách trong bãi → Ra, còn lại → Tu choi
+                    # CỔNG RA: cư dân → Ra, khách trong bãi → Tu choi (yêu cầu thu phí trước khi cho ra)
                     if is_resident:
                         trang_thai = "Ra"
                     elif is_visitor_in_lot(plate_text):
-                        trang_thai = "Ra"      # Khách đã trả tiền → cho ra
-                        is_resident = True     # Đánh dấu để mở barrier
-                        print(f"[AI-{gate_id}] Khách vãng lai ra: {plate_text}")
+                        trang_thai = "Tu choi" # Xe khách cần thanh toán mới được chuyển sang 'Ra'
                     else:
                         trang_thai = "Tu choi"
-                else:
-                    trang_thai = "Tu choi"
+
+                # ── Gửi lệnh mở cổng nếu là cư dân hợp lệ ──
+                if trang_thai in ["Vao", "Ra"] and is_resident:
+                    open_gate_http(gate_id)
+                    print(f"  >>> MỞ CỔNG {gate_id} (Cư dân)")
 
                 # Encode crop base64
                 _, buffer = cv2.imencode('.jpg', crop)
@@ -651,7 +783,19 @@ def detect_worker(gate_id: int):
                     insert_history(plate_text, trang_thai, img_base64, gate_id=gate_id)
 
                 # Broadcast tới Web
-                is_visitor_alert = (gate_id == 1 and trang_thai == "Tu choi")
+                is_visitor_alert = (not is_resident and ((gate_id == 1) or (gate_id == 2 and is_visitor_in_lot(plate_text))))
+                
+                # Logic: Cổng 1 vãng lai -> Vào ngay (ghi log), Cổng 2 vãng lai -> Alert
+                if gate_id == 1 and not is_resident:
+                    insert_history(plate_text, "Vao", img_base64, gate_id=gate_id)
+                    trang_thai = "Vao"
+                    is_visitor_alert = False # Không cần alert ở cổng vào nữa vì thu tiền ở cổng ra
+
+                # Lấy ảnh lúc vào để đối chiếu nếu là cổng ra và là xe khách
+                entry_image_base64 = None
+                if gate_id == 2 and not is_resident:
+                    entry_image_base64 = get_entry_image(plate_text)
+
                 detection_result = {
                     "gate_id": gate_id,
                     "gate_name": "Làn Vào" if gate_id == 1 else "Làn Ra",
@@ -660,9 +804,10 @@ def detect_worker(gate_id: int):
                     "is_resident": is_resident,
                     "trang_thai": trang_thai,
                     "processed": True,
-                    "visitor_alert": is_visitor_alert,  # Flag để frontend hiển thị panel thu phí
-                    "timestamp": time.strftime("%H:%M:%S"),
-                    "image": f"data:image/jpeg;base64,{img_base64}"
+                    "visitor_alert": is_visitor_alert,
+                    "timestamp": datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None).strftime("%H:%M:%S"),
+                    "image": f"data:image/jpeg;base64,{img_base64}",
+                    "entry_image": f"data:image/jpeg;base64,{entry_image_base64}" if entry_image_base64 else None
                 }
                 asyncio.run(broadcast_detection(detection_result))
 
@@ -676,67 +821,6 @@ def detect_worker(gate_id: int):
             print(f"[AI-WORKER-{gate_id}] Lỗi: {e}")
             time.sleep(1)
 
-            # 4. Kiểm tra Database & Điều khiển
-            resident = check_plate_in_db(plate_text)
-            
-            # Fuzzy matching nếu không khớp trực tiếp
-            if not resident:
-                all_res = get_all_residents_for_fuzzy()
-                for norm, original, owner in all_res:
-                    ratio = difflib.SequenceMatcher(None, normalize_plate(plate_text), norm).ratio()
-                    if ratio > 0.8:
-                        resident = {"bien_so_xe": original, "ten_chu_xe": owner}
-                        plate_text = original
-                        break
-
-            # 5. Broadcast & Log & Control
-            # Cooldown để tránh spam 1 xe liên tục (vd: 10 giây)
-            if plate_text != state.last_processed_plate or (now - state.last_process_time > 10):
-                is_resident = resident is not None
-                
-                # Encode crop to base64 for logging
-                _, buffer = cv2.imencode('.jpg', crop)
-                img_base64 = base64.b64encode(buffer).decode('utf-8')
-                
-                # Mở cổng nếu là cư dân
-                barrier_opened = False
-                if is_resident:
-                    barrier_opened = open_barrier()
-                
-                # Log vào DB kèm ảnh x mảnh
-                insert_history(plate_text, "Vao" if is_resident else "Tu Choi", img_base64)
-                
-                # Build JSON data
-                detection_result = {
-                    "detected": True,
-                    "plate": plate_text,
-                    "matched_plate": resident["bien_so_xe"] if resident else None,
-                    "owner": resident["ten_chu_xe"] if resident else "Người lạ",
-                    "can_ho": resident["so_can_ho"] if resident else "N/A",
-                    "is_resident": is_resident,
-                    "bbox": [x1, y1, x2, y2],
-                    "confidence": float(box.conf[0]),
-                    "processed": True,
-                    "barrier_opened": barrier_opened,
-                    "timestamp": time.strftime("%H:%M:%S"),
-                    "image": f"data:image/jpeg;base64,{img_base64}"
-                }
-                
-                # Broadcast tới Web qua WebSocket
-                asyncio.run(broadcast_detection(detection_result))
-                
-                state.last_processed_plate = plate_text
-                print(f"[AI-WORKER] Phát hiện: {plate_text} (Resident: {is_resident}) - Barrier: {barrier_opened}")
-            
-            state.last_process_time = now
-            
-        except Exception as e:
-            print(f"[AI-WORKER] Lỗi: {e}")
-            traceback.print_exc()
-            time.sleep(1)
-        except ValueError:
-            pass
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  API ENDPOINTS
@@ -746,73 +830,18 @@ def detect_worker(gate_id: int):
 @app.get("/api/health", tags=["System"])
 async def health():
     db_ok = False
-    db_error = None
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
         db_ok = True
-    except Exception as e:
-        db_error = str(e)
-
+    except: pass
     return {
         "status": "ok",
-        "db": "connected" if db_ok else f"error: {db_error}",
-        "yolo": "loaded" if state.yolo_model is not None else "not loaded",
-        "ocr": "loaded" if state.easyocr_reader is not None else "not loaded",
+        "db": "connected" if db_ok else "error",
         "gpu": state.use_cuda,
+        "camera_mode": state.camera_mode
     }
-
-
-# ── Detect — nhận frame và xử lý ────────────────────────────────────────────
-@app.post("/api/detect", tags=["Detection"])
-async def detect_plate(
-    image: Optional[UploadFile] = File(None),
-    image_base64: Optional[str] = Form(None),
-    demo_mode: bool = Form(True),
-):
-    """
-    Nhận frame từ frontend (multipart file hoặc base64 string),
-    chạy YOLO + OCR, ghi DB, trả về kết quả JSON.
-    """
-    # Decode image
-    img_bytes = None
-    if image is not None:
-        img_bytes = await image.read()
-    elif image_base64:
-        # Loại bỏ prefix data URL nếu có
-        b64 = image_base64
-        if "," in b64:
-            b64 = b64.split(",", 1)[1]
-        try:
-            img_bytes = base64.b64decode(b64)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Base64 decode lỗi: {e}")
-    else:
-        raise HTTPException(status_code=400, detail="Cần truyền 'image' (file) hoặc 'image_base64'")
-
-    # Chuyển bytes → numpy array
-    try:
-        np_arr = np.frombuffer(img_bytes, np.uint8)
-        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if frame is None:
-            raise ValueError("Không decode được ảnh")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Lỗi decode ảnh: {e}")
-
-    # Xử lý qua AI
-    try:
-        result = process_frame_core(frame, demo_mode=demo_mode)
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Lỗi xử lý AI: {e}")
-
-    # Broadcast kết quả qua WebSocket nếu đã xử lý
-    if result.get("processed"):
-        await broadcast({"type": "detection", "data": result})
-
-    return result
-
 
 @app.get("/api/video_feed", tags=["System"])
 async def video_feed(gate_id: int = 1):
@@ -820,137 +849,68 @@ async def video_feed(gate_id: int = 1):
     gate = state.gates.get(gate_id)
     if not gate or gate.latest_frame is None:
         return JSONResponse({"status": "error", "message": "Camera not ready"}, status_code=503)
-
     from fastapi.responses import StreamingResponse
-    
     def gen():
         while True:
             if gate.latest_frame is not None:
-                # Encode with optimization (quality 80 is good for ALPR)
                 _, jpeg = cv2.imencode('.jpg', gate.latest_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-            time.sleep(0.04) # ~25 FPS
-
+            time.sleep(0.04)
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
-
-@app.post("/api/detect_current", tags=["Detection"])
-async def detect_current(gate_id: int = Form(1), demo_mode: bool = Form(True)):
-    """Xử lý frame hiện tại đang có trong buffer của server"""
-    gate = state.gates.get(gate_id)
-    if not gate or gate.latest_frame is None:
-        raise HTTPException(status_code=503, detail="Camera chưa sẵn sàng")
+# ── Hardware Trigger ────────────────────────────────────────────────────────
+@app.post("/api/hardware/open_manual/{gate_id}", tags=["Hardware"])
+async def open_manual(gate_id: int):
+    """Bảo vệ mở cổng thủ công không qua AI, không lưu lịch sử"""
+    # 1. Phát lệnh mở mạch phần cứng
+    open_gate_http(gate_id)
     
-    try:
-        result = process_frame_core(gate.latest_frame, demo_mode=demo_mode)
-        if result.get("processed"):
-            # Localize result
-            await broadcast_detection(result)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"success": True, "message": f"Đã mở cổng {1 if gate_id == 1 else 2} thủ công"}
 
 
-# Alias cho ESP32-CAM nếu cần trigger từ thiết bị
 @app.post("/api/iot/trigger", tags=["Hardware"])
 async def iot_trigger(gate: str = "in"):
     return await hardware_trigger(gate)
 
 @app.post("/api/trigger", tags=["Hardware"])
 async def hardware_trigger(gate: str = "in"):
-    """
-    Endpoint gọi bởi ESP8266 khi cảm biến siêu âm phát hiện xe.
-    gate: 'in' (cổng vào) hoặc 'out' (cổng ra)
-    """
-    if state.latest_frame is None:
+    """Cổng kết nối thực tế dành cho ESP8266/ESP32-CAM"""
+    gate_id = 1 if gate == "in" else 2
+    gate_obj = state.gates.get(gate_id)
+    
+    if not gate_obj or gate_obj.latest_frame is None:
         return {"action": "deny", "reason": "Camera chưa sẵn sàng"}
 
-    # 1. Kiểm tra chỗ trống nếu là cổng vào
     occupied = get_current_parking_count()
     if gate == "in" and occupied >= PARKING_CAPACITY:
         return {"action": "deny", "reason": "Bãi xe đã đầy"}
 
-    # 2. Xử lý AI
-    # Chụp frame hiện tại
-    frame = state.latest_frame.copy()
-    result = process_frame_core(frame, demo_mode=False)
+    frame = gate_obj.latest_frame.copy()
+    result = process_frame_core(frame)
 
     if not result.get("processed"):
-        return {"action": "deny", "reason": result.get("reason", "Không nhận diện được biển số")}
+        return {"action": "deny", "reason": "Không nhận diện được"}
 
     plate = result.get("plate")
     is_resident = result.get("is_resident", False)
-    
-    # 3. Logic mở Barrier
-    action = "deny"
-    barrier_opened = False
-    if is_resident:
-        action = "open"
-        barrier_opened = open_barrier()
-    
-    # 4. Gửi dữ liệu so sánh cho frontend nếu là cổng ra
-    comparison_image = None
-    if gate == "out":
-        comparison_image = get_entry_image(plate)
-        if comparison_image:
-            result["entry_image"] = f"data:image/jpeg;base64,{comparison_image}"
+    action = "open" if is_resident or gate == "in" else "deny"
 
-    # Cập nhật kết quả với thông tin bãi xe
-    result["gate"] = "Vào" if gate == "in" else "Ra"
-    result["occupied"] = occupied + (1 if gate == "in" and action == "open" else -1 if gate == "out" and action == "open" else 0)
-    result["capacity"] = PARKING_CAPACITY
+    # 💡 LƯU Ý QUAN TRỌNG: 
+    # ESP8266 sẽ tự mở cổng nếu nhận được {"action":"open"} trong response của POST này.
+    # Do đó chúng ta KHÔNG gọi open_gate_http(gate_id) ở đây để tránh gửi 2 lệnh trùng lặp.
     
-    # Broadcast qua WebSocket
+    # Đồng bộ UI
+    result["gate_id"] = gate_id
+    result["visitor_alert"] = (not is_resident and gate == "out")
     await broadcast_detection(result)
-
-    return {
-        "action": action,
-        "plate": plate,
-        "owner": result.get("owner"),
-        "reason": "Thành công" if action == "open" else "Không phải cư dân"
-    }
-
-
-# ── Simulation ──────────────────────────────────────────────────────────────
-@app.post("/api/simulate/trigger", tags=["Simulation"])
-async def simulate_trigger(image_base64: Optional[str] = Form(None), gate: str = "in"):
-    """
-    Giả lập một vụ trigger từ cảm biến. 
-    Nếu có image_base64, server sẽ dùng ảnh đó thay vì frame từ camera live.
-    """
-    print(f"[SIMULATE] Triggering simulation for gate: {gate}")
     
-    frame = None
-    if image_base64:
-        # Decode image từ base64
-        try:
-            if "," in image_base64:
-                image_base64 = image_base64.split(",", 1)[1]
-            img_bytes = base64.b64decode(image_base64)
-            np_arr = np.frombuffer(img_bytes, np.uint8)
-            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Lỗi decode ảnh: {e}")
-    
-    # Nếu không có ảnh giả lập, dùng ảnh từ buffer (nếu có)
-    if frame is None:
-        if state.latest_frame is not None:
-            frame = state.latest_frame.copy()
-        else:
-            # Dùng frame đen nếu hoàn toàn không có camera cho đỡ crash
-            frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(frame, "SIMULATED FRAME (NO CAMERA)", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    # Ghi log
+    insert_history(plate, "Vao" if gate == "in" else "Ra", result.get("image", ""), gate_id=gate_id)
 
-    # Chạy xử lý logic như thật (demo_mode=False để test mở cổng)
-    result = process_frame_core(frame, demo_mode=False)
-    
-    # Broadcast kết quả
-    if result.get("processed"):
-        result["gate"] = "Vào" if gate == "in" else "Ra"
-        await broadcast_detection(result)
-        
-    return result
+    return {"action": action, "plate": plate, "owner": result.get("owner")}
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
 
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
@@ -968,13 +928,28 @@ async def get_logs(limit: int = 50, status: str = "all", date: str = "all"):
                 params = []
 
                 if status != "all":
-                    conditions.append("trang_thai = %s")
-                    params.append(status)
+                    if status == "stranger":
+                        # Lọc tất cả khách vãng lai (Không có trong danh sách cư dân)
+                        conditions.append(f"""
+                            NOT EXISTS (
+                                SELECT 1 FROM cudan c 
+                                WHERE UPPER(REGEXP_REPLACE(c.bien_so_xe, '[.\\-\\s_]', '', 'g')) = 
+                                      UPPER(REGEXP_REPLACE(lichsuravao.bien_so_xe, '[.\\-\\s_]', '', 'g'))
+                            )
+                        """)
+                    else:
+                        # Lọc theo trạng thái cụ thể: 'Vao', 'Ra', hoặc 'Tu choi' (Xe bị chặn)
+                        conditions.append("trang_thai = %s")
+                        params.append(status)
 
                 if date == "today":
-                    conditions.append("DATE(thoi_gian) = CURRENT_DATE")
+                    vn_today = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None).date()
+                    conditions.append("DATE(thoi_gian) = %s")
+                    params.append(vn_today)
                 elif date == "week":
-                    conditions.append("thoi_gian >= NOW() - INTERVAL '7 days'")
+                    vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
+                    conditions.append("thoi_gian >= %s - INTERVAL '7 days'")
+                    params.append(vn_now)
 
                 where = "WHERE " + " AND ".join(conditions) if conditions else ""
                 cur.execute(
@@ -1001,30 +976,57 @@ async def get_logs(limit: int = 50, status: str = "all", date: str = "all"):
 
 
 # ── Stats ────────────────────────────────────────────────────────────────────
+@app.delete("/api/logs/all", tags=["Logs"])
+async def delete_all_logs():
+    """Xóa toàn bộ lịch sử ra vào (Dùng để test)"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM lichsuravao")
+                conn.commit()
+                # Reset thanh thống kê ngay lập tức
+                await broadcast_message({"type": "refresh_stats"})
+                return {"success": True, "message": "Đã xóa toàn bộ lịch sử"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/stats", tags=["Stats"])
 async def get_stats():
     """Thống kê: xe đang trong bãi, lượt vào/ra hôm nay"""
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # Lượt vào hôm nay
+                # Lượt vào hôm nay - Dùng khoảng thời gian từ 0h sáng tới hiện tại
+                vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
+                start_of_today = vn_now.replace(hour=0, minute=0, second=0, microsecond=0)
+                
                 cur.execute(
-                    "SELECT COUNT(*) as cnt FROM lichsuravao WHERE trang_thai='Vao' AND DATE(thoi_gian)=CURRENT_DATE"
+                    "SELECT COUNT(*) as cnt FROM lichsuravao WHERE trang_thai='Vao' AND thoi_gian >= %s",
+                    (start_of_today,)
                 )
                 entries_today = cur.fetchone()["cnt"]
 
                 # Lượt ra hôm nay
                 cur.execute(
-                    "SELECT COUNT(*) as cnt FROM lichsuravao WHERE trang_thai='Ra' AND DATE(thoi_gian)=CURRENT_DATE"
+                    "SELECT COUNT(*) as cnt FROM lichsuravao WHERE trang_thai='Ra' AND thoi_gian >= %s",
+                    (start_of_today,)
                 )
                 exits_today = cur.fetchone()["cnt"]
 
-                # Xe lạ hôm nay
-                cur.execute(
-                    "SELECT COUNT(*) as cnt FROM lichsuravao WHERE trang_thai='Tu choi' AND DATE(thoi_gian)=CURRENT_DATE"
-                )
+                # Đếm người lạ: Số lượng BIỂN SỐ duy nhất không thuộc bảng cudan xuất hiện hôm nay
+                cur.execute("""
+                    SELECT COUNT(DISTINCT l.bien_so_xe) as cnt 
+                    FROM lichsuravao l
+                    WHERE l.thoi_gian >= %s
+                    AND NOT EXISTS (
+                        SELECT 1 FROM cudan c 
+                        WHERE UPPER(REGEXP_REPLACE(c.bien_so_xe, '[.\\-\\s_]', '', 'g')) = 
+                              UPPER(REGEXP_REPLACE(l.bien_so_xe, '[.\\-\\s_]', '', 'g'))
+                    )
+                """, (start_of_today,))
                 strangers_today = cur.fetchone()["cnt"]
-
+                
                 # Ước tính xe đang trong bãi = vào - ra (tuy chưa chính xác 100%)
                 estimated_inside = max(0, entries_today - exits_today)
 
@@ -1077,6 +1079,10 @@ async def add_resident(body: ResidentCreate):
                 )
                 new_id = cur.fetchone()["id"]
                 conn.commit()
+                
+                # Đồng bộ cư dân ra file sau khi thêm mới
+                export_residents_to_json()
+                
                 return {"success": True, "id": new_id, "message": f"Đã thêm cư dân: {body.ten_chu_xe}"}
     except psycopg2.errors.UniqueViolation:
         raise HTTPException(status_code=409, detail=f"Biển số {body.bien_so_xe} đã tồn tại")
@@ -1095,6 +1101,10 @@ async def delete_resident(resident_id: int):
                 if not row:
                     raise HTTPException(status_code=404, detail="Không tìm thấy cư dân")
                 conn.commit()
+                
+                # Đồng bộ cư dân sau khi xóa
+                export_residents_to_json()
+                
                 return {"success": True, "message": f"Đã xóa: {row['ten_chu_xe']}"}
     except HTTPException:
         raise
@@ -1110,12 +1120,16 @@ async def update_resident(resident_id: int, body: ResidentCreate):
                 cur.execute(
                     """
                     UPDATE cudan 
-                    SET bien_so_xe=%s, ten_chu_xe=%s, so_can_ho=%s, anh_dang_ky=%s, so_dien_thoai=%s, da_thanh_toan=%s, phi_thang=%s, updated_at=NOW()
+                    SET bien_so_xe=%s, ten_chu_xe=%s, so_can_ho=%s, anh_dang_ky=%s, so_dien_thoai=%s, da_thanh_toan=%s, phi_thang=%s, updated_at=%s
                     WHERE id=%s
                     """,
-                    (body.bien_so_xe.upper(), body.ten_chu_xe, body.so_can_ho, body.anh_dang_ky, body.so_dien_thoai, body.da_thanh_toan, body.phi_thang, resident_id)
+                    (body.bien_so_xe.upper(), body.ten_chu_xe, body.so_can_ho, body.anh_dang_ky, body.so_dien_thoai, body.da_thanh_toan, body.phi_thang, datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None), resident_id)
                 )
                 conn.commit()
+                
+                # Đồng bộ cư dân sau khi cập nhật
+                export_residents_to_json()
+                
                 return {"success": True, "message": "Cập nhật thành công"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi DB: {e}")
@@ -1140,19 +1154,24 @@ async def toggle_payment(resident_id: int):
                 # Cập nhật trạng thái cư dân
                 cur.execute("UPDATE cudan SET da_thanh_toan = %s WHERE id = %s", (new_status, resident_id))
                 
+                # Lấy giờ Việt Nam (Naive)
+                vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
+                vn_today = vn_now.date()
+
                 # Xử lý Doanh Thu
                 if new_status:
                     # Chuyển sang ĐÃ THANH TOÁN: Kiểm tra xem tháng này đã có chưa (để tránh thu trùng)
+                    # Sử dụng vn_now để so sánh tháng
                     cur.execute("""
                         SELECT id FROM doanh_thu 
                         WHERE resident_id = %s 
-                        AND date_trunc('month', ngay_thanh_toan) = date_trunc('month', CURRENT_DATE)
+                        AND date_trunc('month', ngay_thanh_toan) = date_trunc('month', %s::timestamp)
                         LIMIT 1
-                    """, (resident_id,))
+                    """, (resident_id, vn_now))
                     if not cur.fetchone():
                         cur.execute(
-                            "INSERT INTO doanh_thu (resident_id, bien_so_xe, so_tien, loai_phi) VALUES (%s, %s, %s, %s)",
-                            (resident_id, plate, custom_fee, 'MONTHLY')
+                            "INSERT INTO doanh_thu (resident_id, bien_so_xe, so_tien, loai_phi, ngay_thanh_toan) VALUES (%s, %s, %s, %s, %s)",
+                            (resident_id, plate, custom_fee, 'MONTHLY', vn_now)
                         )
                 else:
                     # Chuyển sang CHƯA THANH TOÁN (Hủy thu): Xóa bản ghi thu phí gần nhất của tháng này
@@ -1161,16 +1180,34 @@ async def toggle_payment(resident_id: int):
                         WHERE id IN (
                             SELECT id FROM doanh_thu 
                             WHERE resident_id = %s 
-                            AND date_trunc('month', ngay_thanh_toan) = date_trunc('month', CURRENT_DATE)
+                            AND date_trunc('month', ngay_thanh_toan) = date_trunc('month', %s::timestamp)
                             ORDER BY ngay_thanh_toan DESC 
                             LIMIT 1
                         )
-                    """, (resident_id,))
+                    """, (resident_id, vn_now))
                 
                 conn.commit()
+                
+                # Đồng bộ cư dân sau khi đổi trạng thái thanh toán
+                export_residents_to_json()
+                
                 return {"success": True, "da_thanh_toan": new_status}
     except Exception as e:
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/revenue/{revenue_id}", tags=["Revenue"])
+async def delete_revenue(revenue_id: int):
+    """Xóa một bản ghi doanh thu (dùng để dọn dẹp dữ liệu giả lập/sai)."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM doanh_thu WHERE id = %s", (revenue_id,))
+                if cur.rowcount == 0:
+                    raise HTTPException(status_code=404, detail="Không tìm thấy bản ghi doanh thu")
+                conn.commit()
+                return {"success": True, "message": "Đã xóa bản ghi doanh thu"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/residents/{resident_id}", tags=["Residents"])
@@ -1212,12 +1249,16 @@ async def get_revenue_stats():
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
+                # Lấy thời gian ICT (Naive)
+                vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
+                vn_today = vn_now.date()
+
                 # Doanh thu hôm nay
-                cur.execute("SELECT COALESCE(SUM(so_tien), 0)::BIGINT as total FROM doanh_thu WHERE DATE(ngay_thanh_toan) = CURRENT_DATE")
+                cur.execute("SELECT COALESCE(SUM(so_tien), 0)::BIGINT as total FROM doanh_thu WHERE DATE(ngay_thanh_toan) = %s", (vn_today,))
                 today = cur.fetchone()['total']
                 
                 # Doanh thu tháng này
-                cur.execute("SELECT COALESCE(SUM(so_tien), 0)::BIGINT as total FROM doanh_thu WHERE date_trunc('month', ngay_thanh_toan) = date_trunc('month', CURRENT_DATE)")
+                cur.execute("SELECT COALESCE(SUM(so_tien), 0)::BIGINT as total FROM doanh_thu WHERE date_trunc('month', ngay_thanh_toan) = date_trunc('month', %s::timestamp)", (vn_now,))
                 month = cur.fetchone()['total']
                 
                 # Số lượt khách thăm (số biển số xe lạ đi vào cổng 1 hôm nay)
@@ -1226,8 +1267,8 @@ async def get_revenue_stats():
                     FROM lichsuravao 
                     WHERE trang_thai = 'Vao' 
                     AND bien_so_xe NOT IN (SELECT bien_so_xe FROM cudan) 
-                    AND DATE(thoi_gian) = CURRENT_DATE
-                """)
+                    AND DATE(thoi_gian) = %s
+                """, (vn_today,))
                 visitors_today = cur.fetchone()['count']
 
                 return {
@@ -1261,13 +1302,14 @@ async def get_revenue_chart():
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
+                vn_today = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None).date()
                 cur.execute("""
                     SELECT date(d) as day, COALESCE(SUM(so_tien), 0) as total
-                    FROM generate_series(CURRENT_DATE - INTERVAL '6 days', CURRENT_DATE, '1 day'::interval) d
+                    FROM generate_series(%s - INTERVAL '6 days', %s, '1 day'::interval) d
                     LEFT JOIN doanh_thu ON date(ngay_thanh_toan) = date(d)
                     GROUP BY date(d)
                     ORDER BY date(d)
-                """)
+                """, (vn_today, vn_today))
                 rows = cur.fetchall()
                 # Chuyển đổi date object sang string để JSON serialize được
                 data = [{"day": r['day'].strftime('%d/%m'), "total": int(r['total'])} for r in rows]
@@ -1384,10 +1426,13 @@ async def update_hardware_status(body: HardwareStatus):
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # Cảm biến 3, 4, 5 tương ứng ô đỗ 1, 2, 3
+                # Lấy giờ Việt Nam (ICT) Naive
+                vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
+                # Cấu trúc Sensors từ ESP gửi lên: [S_Vao, S_Ra, Slot1, Slot2, Slot3]
+                # Cảm biến 3, 4, 5 (index 2, 3, 4) tương ứng ô đỗ 1, 2, 3
                 for i in range(2, 5): 
-                    cur.execute("UPDATE parking_slots SET status=%s, updated_at=NOW() WHERE slot_id=%s", 
-                                (bool(body.sensors[i]), i-1))
+                    cur.execute("UPDATE parking_slots SET status=%s, updated_at=%s WHERE slot_id=%s", 
+                                (bool(body.sensors[i]), vn_now, i-1))
                 conn.commit()
     except Exception as e:
         print(f"[DB] Cập nhật ô đỗ lỗi: {e}")
@@ -1400,79 +1445,151 @@ async def open_manual(gate_id: int):
     if gate_id not in [1, 2]:
         raise HTTPException(status_code=400, detail="Gate ID không hợp lệ")
     print(f"[LOG] Bảo vệ nhấn nút mở cổng {gate_id} thủ công")
-    insert_history("MANUAL", "Mo Thu Cong", "", gate_id=gate_id)
-    state.pending_open_gates.append(gate_id)
+    
+    trang_thai = "Vao" if gate_id == 1 else "Ra"
+    insert_history("MANUAL", trang_thai, "", gate_id=gate_id)
+    # state.pending_open_gates.append(gate_id) # Không cần dùng queue nữa, gửi trực tiếp
+    open_gate_http(gate_id)
     return {"success": True, "message": f"Đã gửi lệnh mở cổng {gate_id}"}
 
 
 # ─── Visitor Management ──────────────────────────────────────────────────────
+@app.get("/api/visitor/calculate_fee/{plate}", tags=["Visitors"])
+async def calculate_visitor_fee(plate: str):
+    """Tính toán thời gian đỗ và số tiền cho xe vãng lai"""
+    entry_time = get_visitor_last_entry(plate)
+    if not entry_time:
+        return {"plate": plate, "duration_minutes": 0, "fee": 0, "entry_time": None}
+    
+    # Sử dụng giờ Việt Nam (Naive)
+    vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
+    
+    # Nếu entry_time chưa có timezone (naïve), giả định nó là ICT (+7)
+    if entry_time.tzinfo is None:
+        # Giả định thời gian trong DB đã được lưu ở dạng ICT Naive
+        pass
+    else:
+        # Nếu là aware (cũ), chuyển về naive ICT
+        entry_time = entry_time.astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+        
+    duration = vn_now - entry_time
+    duration_minutes = int(duration.total_seconds() / 60)
+    
+    # Chuyển sang thu phí lượt: 20k/lượt cố định
+    fee = VISITOR_FLAT_FEE
+        
+    return {
+        "plate": plate,
+        "entry_time": entry_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "now": vn_now.strftime("%Y-%m-%d %H:%M:%S"),
+        "duration_minutes": duration_minutes,
+        "hours": math.ceil(duration_minutes / 60) if duration_minutes > 0 else 0,
+        "fee": fee
+    }
+
 class VisitorPayRequest(BaseModel):
     bien_so_xe: str
     gate_id: int = 1
 
 @app.post("/api/visitor/pay", tags=["Visitors"])
 async def visitor_pay(body: VisitorPayRequest):
-    """Thu phí khách vãng lai và mở cổng vào (20.000đ/lượt)"""
+    """Thu phí khách vãng lai và mở cổng (Hỗ trợ thu phí theo giờ tại cổng ra)"""
     plate = normalize_plate(body.bien_so_xe)
     if not plate:
         raise HTTPException(status_code=400, detail="Biển số không hợp lệ")
     try:
+        # Tính toán phí thực tế
+        fee_info = await calculate_visitor_fee(plate)
+        fee = fee_info['fee']
+        
         with get_conn() as conn:
             with conn.cursor() as cur:
+                vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
                 # Ghi doanh thu
                 cur.execute(
-                    "INSERT INTO doanh_thu (resident_id, bien_so_xe, so_tien, loai_phi) VALUES (NULL, %s, %s, 'VISITOR')",
-                    (plate, VISITOR_FEE)
+                    "INSERT INTO doanh_thu (resident_id, bien_so_xe, so_tien, loai_phi, ngay_thanh_toan) VALUES (NULL, %s, %s, 'VISITOR', %s)",
+                    (plate, fee, vn_now)
                 )
-                # Ghi lịch sử vào
+                # Ghi lịch sử lượt RA (Vì thu tiền lúc ra)
                 cur.execute(
-                    "INSERT INTO lichsuravao (bien_so_xe, thoi_gian, trang_thai, anh_bien_so) VALUES (%s, NOW(), 'Vao', '')",
-                    (plate,)
+                    "INSERT INTO lichsuravao (bien_so_xe, thoi_gian, trang_thai, anh_bien_so) VALUES (%s, %s, 'Ra', '')",
+                    (plate, vn_now)
                 )
                 conn.commit()
 
-        # Đưa lệnh mở cổng vào hàng đợi (ESP poll qua hardware/status)
-        state.pending_open_gates.append(body.gate_id)
+        # Đưa lệnh mở cổng vào hàng đợi
+        # state.pending_open_gates.append(body.gate_id)
+        open_gate_http(body.gate_id) # Gửi trực tiếp
 
-        # Broadcast để cập nhật lịch sử trên Dashboard
+        # Broadcast để cập nhật
         await broadcast_detection({
             "type": "visitor_paid",
             "gate_id": body.gate_id,
-            "gate_name": "Làn Vào",
             "plate": plate,
-            "so_tien": VISITOR_FEE,
-            "is_resident": False,
-            "trang_thai": "Vao",
+            "so_tien": fee,
+            "trang_thai": "Ra",
             "processed": True,
             "visitor_alert": False,
             "timestamp": time.strftime("%H:%M:%S"),
         })
-        print(f"[VISITOR] Thu phí {VISITOR_FEE:,}đ từ xe {plate}. Mở cổng {body.gate_id}.")
-        return {"success": True, "so_tien": VISITOR_FEE, "bien_so_xe": plate}
+        print(f"[VISITOR] Thu phí {fee:,}đ từ xe {plate}. Mở cổng {body.gate_id}.")
+        return {"success": True, "so_tien": fee, "bien_so_xe": plate}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/config/fees", tags=["Config"])
-async def get_fees():
-    """Lấy cấu hình phí gửi xe"""
-    return {"visitor_fee": VISITOR_FEE, "monthly_fee": MONTHLY_FEE}
+@app.get("/api/revenue/by_type", tags=["Revenue"])
+async def get_revenue_by_type():
+    """Tỷ trọng doanh thu theo loại phí (Pie Chart)"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT loai_phi, SUM(so_tien) as total, COUNT(*) as count
+                    FROM doanh_thu
+                    GROUP BY loai_phi
+                """)
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class FeeConfig(BaseModel):
     visitor_fee: int
 
+@app.get("/api/config/fees", tags=["Config"])
+async def get_fees():
+    """Lấy cấu hình phí gửi xe"""
+    return {"visitor_fee": VISITOR_FLAT_FEE, "monthly_fee": MONTHLY_FEE}
+
 @app.post("/api/config/fees", tags=["Config"])
 async def set_fees(body: FeeConfig):
-    """Cập nhật phí khách vãng lai"""
-    global VISITOR_FEE
-    if body.visitor_fee < 0:
-        raise HTTPException(status_code=400, detail="Phí không hợp lệ")
-    VISITOR_FEE = body.visitor_fee
-    print(f"[CONFIG] Phí khách cập nhật: {VISITOR_FEE:,}đ/lượt")
-    return {"success": True, "visitor_fee": VISITOR_FEE}
+    """Cập nhật phí khách vãng lai (cố định)"""
+    global VISITOR_FLAT_FEE
+    VISITOR_FLAT_FEE = body.visitor_fee
+    print(f"[CONFIG] Phí khách cập nhật: {VISITOR_FLAT_FEE:,}đ/lượt")
+    return {"success": True, "visitor_fee": VISITOR_FLAT_FEE}
 
+
+class ConfigRequest(BaseModel):
+    gate1_ip: str
+    gate2_ip: str
+    esp8266_ip: str
+
+@app.post("/api/config/system", tags=["Config"])
+async def update_system_config(body: ConfigRequest):
+    """Cập nhật cấu hình hệ thống: IP Camera và IP Hardware (ESP8266)"""
+    state.gates[1].ip = body.gate1_ip
+    state.gates[2].ip = body.gate2_ip
+    state.esp8266_ip = body.esp8266_ip
+    save_config()
+    return {"success": True, "message": "Đã lưu cấu hình hệ thống"}
+
+
+# 5. Kiểm tra và nạp cư dân từ Git Sync (nếu có)
+import_residents_from_json()
 
 # ─── Chạy server ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
