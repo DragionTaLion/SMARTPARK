@@ -157,6 +157,7 @@ class AppState:
         
         # Hàng đợi lệnh mở cổng cho ESP (visitor pay)
         self.pending_open_gates: List[int] = []
+        self.main_loop: Optional[asyncio.AbstractEventLoop] = None
 
 state = AppState()
 
@@ -231,6 +232,9 @@ async def lifespan(app: FastAPI):
     print("\n" + "=" * 60)
     print("  KHOI DONG SMARTPARK V2 SERVER")
     print("=" * 60)
+    
+    # Lưu event loop chính để dùng trong các thread khác
+    state.main_loop = asyncio.get_running_loop()
     
     # Kiểm tra GPU
     try:
@@ -386,12 +390,8 @@ def insert_history(plate: str, trang_thai: str, img_base64: Optional[str] = None
                 conn.commit()
                 
                 # Thông báo cho tất cả Clients làm mới Thống kê (Real-time)
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(broadcast_message({"type": "refresh_stats"}))
-                except Exception:
-                    pass
+                if state.main_loop and state.main_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(broadcast_message({"type": "refresh_stats"}), state.main_loop)
     except Exception as e:
         print(f"[DB] insert_history error: {e}")
 
@@ -809,7 +809,10 @@ def detect_worker(gate_id: int):
                     "image": f"data:image/jpeg;base64,{img_base64}",
                     "entry_image": f"data:image/jpeg;base64,{entry_image_base64}" if entry_image_base64 else None
                 }
-                asyncio.run(broadcast_detection(detection_result))
+                # Broadcast tới Web (Thread-safe)
+                if state.main_loop and state.main_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(broadcast_detection(detection_result), state.main_loop)
+
 
                 gate.last_processed_plate = plate_text
                 log_label = "Khách (chờ thu phí)" if is_visitor_alert else trang_thai
@@ -860,13 +863,6 @@ async def video_feed(gate_id: int = 1):
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 # ── Hardware Trigger ────────────────────────────────────────────────────────
-@app.post("/api/hardware/open_manual/{gate_id}", tags=["Hardware"])
-async def open_manual(gate_id: int):
-    """Bảo vệ mở cổng thủ công không qua AI, không lưu lịch sử"""
-    # 1. Phát lệnh mở mạch phần cứng
-    open_gate_http(gate_id)
-    
-    return {"success": True, "message": f"Đã mở cổng {1 if gate_id == 1 else 2} thủ công"}
 
 
 @app.post("/api/iot/trigger", tags=["Hardware"])
@@ -1387,11 +1383,11 @@ async def update_hardware_status(body: HardwareStatus):
         response["open_gate"] = state.pending_open_gates.pop(0)
 
     # 1. Phát sóng trạng thái cảm biến tới Frontend ngay lập tức
-    asyncio.run(broadcast_detection({
+    await broadcast_detection({
         "type": "hardware_update",
         "sensors": body.sensors,
         "timestamp": time.strftime("%H:%M:%S")
-    }))
+    })
 
     # 2. Xử lý trigger nhận diện biển số (Mở cổng tự động)
     if body.gate_trigger > 0:
@@ -1411,12 +1407,12 @@ async def update_hardware_status(body: HardwareStatus):
                 insert_history(res['plate'], res['trang_thai'], res['plate_crop_base64'], gate_id=g_id)
                 
                 # Gửi thông tin nhận diện tới Dashboard
-                asyncio.run(broadcast_detection({
+                await broadcast_detection({
                     **res, 
                     "gate_id": g_id, 
                     "gate_name": "Làn Vào" if g_id == 1 else "Làn Ra",
                     "image": f"data:image/jpeg;base64,{res['plate_crop_base64']}"
-                }))
+                })
             else:
                 print(f"  ❌ Từ chối: {res.get('plate') or 'Không nhận diện được'}")
                 if res.get("plate"):
@@ -1441,16 +1437,35 @@ async def update_hardware_status(body: HardwareStatus):
 
 @app.post("/api/hardware/open_manual/{gate_id}", tags=["Hardware"])
 async def open_manual(gate_id: int):
-    """Mở cổng thủ công từ Dashboard"""
+    """Mở cổng thủ công từ Dashboard (Có quét biển số)"""
     if gate_id not in [1, 2]:
         raise HTTPException(status_code=400, detail="Gate ID không hợp lệ")
     print(f"[LOG] Bảo vệ nhấn nút mở cổng {gate_id} thủ công")
-    
+
+    gate = state.gates.get(gate_id)
     trang_thai = "Vao" if gate_id == 1 else "Ra"
-    insert_history("MANUAL", trang_thai, "", gate_id=gate_id)
-    # state.pending_open_gates.append(gate_id) # Không cần dùng queue nữa, gửi trực tiếp
+    
+    # 1. Thử quét biển số ngay lúc bấm nút để lưu lịch sử
+    if gate and gate.latest_frame is not None:
+        frame = gate.latest_frame.copy()
+        res = process_frame_core(frame)
+        plate = res.get("plate") or "[THỦ CÔNG]"
+        img_base64 = res.get("plate_crop_base64") or ""
+        
+        insert_history(plate, trang_thai, img_base64, gate_id=gate_id)
+        
+        # Đồng bộ Dashboard
+        if state.main_loop and state.main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(broadcast_detection({
+                **res, 
+                "gate_id": gate_id,
+                "gate_name": "Làn Vào" if gate_id == 1 else "Làn Ra",
+                "image": f"data:image/jpeg;base64,{img_base64}" if img_base64 else None
+            }), state.main_loop)
+            
+    # 2. Phát lệnh mở mạch phần cứng
     open_gate_http(gate_id)
-    return {"success": True, "message": f"Đã gửi lệnh mở cổng {gate_id}"}
+    return {"success": True, "message": f"Đã quét biển số và mở cổng {gate_id}"}
 
 
 # ─── Visitor Management ──────────────────────────────────────────────────────
