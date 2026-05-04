@@ -1638,18 +1638,13 @@ async def update_hardware_status(body: HardwareStatus):
         response["open_gate"] = state.pending_open_gates.pop(0)
         response["cmd"] = "open"
 
-<<<<<<< HEAD
-    # 1. Phát sóng trạng thái cảm biến tới Frontend ngay lập tức
-    await broadcast_detection({
-=======
     # Phát sóng trạng thái cảm biến tới Frontend (dùng asyncio.create_task – không block)
     asyncio.create_task(broadcast_detection({
->>>>>>> b2cc8dfd9ee198238af5a343dc827e066ed1ee44
         "type": "hardware_update",
         "sensors": body.sensors,
         "esp_online": True,
         "timestamp": time.strftime("%H:%M:%S")
-    })
+    }))
 
     # Xử lý trigger nhận diện biển số (chỉ khi chưa có lệnh mở cổng từ queue)
     if body.gate_trigger > 0 and response["cmd"] == "none":
@@ -1662,19 +1657,6 @@ async def update_hardware_status(body: HardwareStatus):
             if res.get("is_resident"):
                 print(f"  ✅ Cư dân: {res['plate']} → MỞ CỔNG {g_id}")
                 response["open_gate"] = g_id
-<<<<<<< HEAD
-                
-                # Ghi lịch sử kèm Gate ID
-                insert_history(res['plate'], res['trang_thai'], res['plate_crop_base64'], gate_id=g_id)
-                
-                # Gửi thông tin nhận diện tới Dashboard
-                await broadcast_detection({
-                    **res, 
-                    "gate_id": g_id, 
-                    "gate_name": "Làn Vào" if g_id == 1 else "Làn Ra",
-                    "image": f"data:image/jpeg;base64,{res['plate_crop_base64']}"
-                })
-=======
                 response["cmd"] = "open"
                 trang_thai = "Vao" if g_id == 1 else "Ra"
                 insert_history(res['plate'], trang_thai, res.get('plate_crop_base64', ''), gate_id=g_id)
@@ -1684,7 +1666,7 @@ async def update_hardware_status(body: HardwareStatus):
                     "gate_name": "Làn Vào" if g_id == 1 else "Làn Ra",
                     "image": f"data:image/jpeg;base64,{res.get('plate_crop_base64', '')}"
                 }))
->>>>>>> b2cc8dfd9ee198238af5a343dc827e066ed1ee44
+
             else:
                 print(f"  ❌ Từ chối: {res.get('plate') or 'Không đọc được biển'}")
                 if res.get("plate"):
