@@ -59,7 +59,7 @@ CHAR_MODEL_PATH = "data/models/char_model/weights/best.pt"
 # ═══════════════════════════════════════════════════════════════════════════
 DB_CONFIG = {
     "host": "localhost",
-    "port": 55432,
+    "port": 54321,
     "dbname": "nhan_dien_bien_so_xe",
     "user": "postgres",
     "password": "postgres",
@@ -133,8 +133,8 @@ class AppState:
     def __init__(self):
         # Mặc định 2 cổng
         self.gates = {
-            1: GateState(1, "192.168.0.102"), # Làn Vào
-            2: GateState(2, "192.168.0.102")  # Làn Ra
+            1: GateState(1, "192.168.137.219"), # Làn Vào
+            2: GateState(2, "192.168.137.212")  # Làn Ra
         }
         self.sensor_states = [0, 0, 0, 0, 0] # Trạng thái 5 cảm biến IR
         
@@ -148,7 +148,7 @@ class AppState:
         self.active_connections: List[WebSocket] = []
         self.ser: Optional[serial.Serial] = None
         self.com_port: str = "COM3"
-        self.esp8266_ip: str = "192.168.0.105"
+        self.esp8266_ip: str = "192.168.137.52"
         self.camera_mode: str = "esp32"
         
         # Cooldown per plate
@@ -225,13 +225,96 @@ def camera_worker(gate_id: int):
     
     if cap: cap.release()
 
+# ─── Khởi tạo Database Schema (tạo bảng/cột còn thiếu) ────────────────────
+def init_db():
+    """Tự động tạo bảng và cột còn thiếu khi server khởi động."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+
+                # ── Bảng cudan ────────────────────────────────────────
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cudan (
+                        id              SERIAL PRIMARY KEY,
+                        bien_so_xe      TEXT UNIQUE NOT NULL,
+                        ten_chu_xe      TEXT NOT NULL,
+                        so_can_ho       TEXT,
+                        anh_dang_ky     TEXT DEFAULT '',
+                        so_dien_thoai   TEXT DEFAULT '',
+                        da_thanh_toan   BOOLEAN DEFAULT FALSE,
+                        phi_thang       INTEGER DEFAULT 500000,
+                        updated_at      TIMESTAMP
+                    )
+                """)
+                # Thêm cột thiếu nếu bảng đã tồn tại từ trước
+                for col, defn in [
+                    ("anh_dang_ky",   "TEXT DEFAULT ''"),
+                    ("so_dien_thoai", "TEXT DEFAULT ''"),
+                    ("da_thanh_toan", "BOOLEAN DEFAULT FALSE"),
+                    ("phi_thang",     "INTEGER DEFAULT 500000"),
+                    ("updated_at",    "TIMESTAMP"),
+                ]:
+                    cur.execute(f"""
+                        ALTER TABLE cudan ADD COLUMN IF NOT EXISTS {col} {defn}
+                    """)
+
+                # ── Bảng lichsuravao ──────────────────────────────────
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS lichsuravao (
+                        id          SERIAL PRIMARY KEY,
+                        bien_so_xe  TEXT NOT NULL,
+                        thoi_gian   TIMESTAMP NOT NULL DEFAULT NOW(),
+                        trang_thai  TEXT NOT NULL,
+                        anh_bien_so TEXT DEFAULT ''
+                    )
+                """)
+
+                # ── Bảng doanh_thu ────────────────────────────────────
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS doanh_thu (
+                        id              SERIAL PRIMARY KEY,
+                        resident_id     INTEGER REFERENCES cudan(id) ON DELETE SET NULL,
+                        bien_so_xe      TEXT NOT NULL,
+                        so_tien         BIGINT NOT NULL DEFAULT 0,
+                        loai_phi        TEXT DEFAULT 'MONTHLY',
+                        ngay_thanh_toan TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                """)
+
+                # ── Bảng parking_slots ────────────────────────────────
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS parking_slots (
+                        slot_id     INTEGER PRIMARY KEY,
+                        status      BOOLEAN DEFAULT FALSE,
+                        updated_at  TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                # Tạo 3 slot mặc định nếu bảng mới tạo
+                for slot_id in [1, 2, 3]:
+                    cur.execute("""
+                        INSERT INTO parking_slots (slot_id, status)
+                        VALUES (%s, FALSE)
+                        ON CONFLICT (slot_id) DO NOTHING
+                    """, (slot_id,))
+
+                conn.commit()
+                print("  ✅ Database schema đã kiểm tra và cập nhật.")
+    except Exception as e:
+        print(f"  ❌ init_db lỗi: {e}")
+
+
 # ─── Lifespan: khởi tạo model khi startup ──────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("\n" + "=" * 60)
     print("  KHOI DONG SMARTPARK V2 SERVER")
     print("=" * 60)
-    
+
+    # ── Bước 0: Khởi tạo DB schema (tạo bảng/cột còn thiếu) ──
+    print("\n  [DB] Kiểm tra schema database...")
+    init_db()
+
     # Kiểm tra GPU
     try:
         import torch
@@ -275,11 +358,12 @@ async def lifespan(app: FastAPI):
 
     # Khởi chạy các luồng xử lý cho từng cổng (V2 Dual-Gate)
     for gate_id in state.gates.keys():
-        # Luồng lấy frame từ camera
         threading.Thread(target=camera_worker, args=(gate_id,), daemon=True, name=f"CameraWorker-{gate_id}").start()
-        # Luồng nhận diện biển số (Auto-pilot)
         threading.Thread(target=detect_worker, args=(gate_id,), daemon=True, name=f"DetectWorker-{gate_id}").start()
-    
+
+    # Luồng giám sát kết nối ESP8266
+    threading.Thread(target=esp_monitor_worker, daemon=True, name="ESP-Monitor").start()
+
     yield
     state.is_running = False
     if state.ser and state.ser.is_open:
@@ -304,24 +388,79 @@ app.add_middleware(
 )
 
 
+# ─── Trạng thái kết nối ESP8266 ────────────────────────────────────────────
+class ESP8266State:
+    def __init__(self):
+        self.connected: bool = False           # ESP8266 đang online không
+        self.last_seen: float = 0              # Thời điểm nhận dữ liệu cuối
+        self.last_command: dict = {}           # Lệnh cuối cùng chờ ESP lấy
+        self.sensor_data: dict = {}            # Dữ liệu cảm biến mới nhất
+        self.command_queue: List[dict] = []    # Hàng đợi lệnh ESP chưa lấy
+
+esp_state = ESP8266State()
+
+
 def open_gate_http(gate_id: int):
-    """Gửi lệnh mở cổng qua HTTP tới ESP8266"""
-    if not state.esp8266_ip: 
+    """Gửi lệnh mở cổng qua HTTP tới ESP8266 (có retry)"""
+    if not state.esp8266_ip:
         print("[HARDWARE] Chưa cấu hình IP ESP8266")
         return
-    
+
     url = f"http://{state.esp8266_ip}/open?gate={gate_id}"
-    print(f"[HARDWARE] Đang gửi lệnh mở cổng {gate_id} tới {url}...")
-    
-    def send_request():
-        try:
-            import requests
-            requests.get(url, timeout=3)
-            print(f"  ✅ Đã gửi lệnh tới ESP8266 thành công.")
-        except Exception as e:
-            print(f"  ❌ Lỗi gửi lệnh tới ESP8266: {e}")
-            
-    threading.Thread(target=send_request, daemon=True).start()
+    print(f"[HARDWARE] Đang gửi lệnh mở cổng {gate_id} → {url}")
+
+    def send_with_retry():
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = requests.get(url, timeout=3)
+                resp.raise_for_status()
+                print(f"  ✅ ESP8266 xác nhận mở cổng {gate_id}: {resp.text[:80]}")
+                esp_state.connected = True
+                esp_state.last_seen = time.time()
+                return
+            except requests.exceptions.ConnectionError:
+                print(f"  ⚠️  [{attempt}/{max_retries}] ESP8266 không phản hồi – thử lại...")
+                esp_state.connected = False
+                time.sleep(1)
+            except Exception as e:
+                print(f"  ❌ Lỗi gửi lệnh mở cổng {gate_id}: {e}")
+                esp_state.connected = False
+                return
+        print(f"  ❌ Gửi lệnh cổng {gate_id} thất bại sau {max_retries} lần thử.")
+
+    threading.Thread(target=send_with_retry, daemon=True).start()
+    # Đồng thời thêm lệnh vào queue để ESP polling lấy
+    esp_state.command_queue.append({"cmd": "open", "gate": gate_id, "ts": time.time()})
+
+
+def esp8266_ping():
+    """Ping ESP8266 để kiểm tra kết nối – chạy background"""
+    if not state.esp8266_ip:
+        return
+    try:
+        resp = requests.get(f"http://{state.esp8266_ip}/ping", timeout=2)
+        if resp.status_code == 200:
+            esp_state.connected = True
+            esp_state.last_seen = time.time()
+    except Exception:
+        esp_state.connected = False
+
+
+def esp_monitor_worker():
+    """Luồng nền: giám sát kết nối ESP8266 dựa trên last_seen (không ping HTTP)"""
+    print("[ESP-MONITOR] Bắt đầu giám sát kết nối ESP8266...")
+    OFFLINE_THRESHOLD = 30  # giây không nhận tín hiệu → offline
+    while state.is_running:
+        time.sleep(10)
+        elapsed = time.time() - esp_state.last_seen if esp_state.last_seen else 999
+        is_online = elapsed < OFFLINE_THRESHOLD
+        esp_state.connected = is_online
+        ip_display = state.esp8266_ip or "chưa biết IP"
+        if is_online:
+            print(f"[ESP-MONITOR] {ip_display} – ✅ Online (seen {elapsed:.0f}s ago)")
+        else:
+            print(f"[ESP-MONITOR] {ip_display} – ❌ Offline (last seen {elapsed:.0f}s ago)")
 
 # ─── Helpers DB ────────────────────────────────────────────────────────────
 def get_conn():
@@ -505,14 +644,30 @@ def process_frame_core(frame: np.ndarray) -> dict:
     x1, y1, x2, y2 = best_box
     plate_crop = frame[y1:y2, x1:x2]
 
-    # OCR
+    # OCR — chỉ dùng char_model YOLO (không dùng EasyOCR)
     plate_text = ""
     try:
-        if state.easyocr_reader is not None:
-            from core.ocr import read_license_plate_2_lines
-            ocr_result = read_license_plate_2_lines(state.easyocr_reader, frame, (x1, y1, x2, y2))
-            if ocr_result.get("confidence", 0) > 0.3:
-                plate_text = (ocr_result.get("line1", "") + ocr_result.get("line2", "")).strip()
+        if state.char_model is not None:
+            char_results = state.char_model.predict(plate_crop, conf=0.4, verbose=False)
+            if len(char_results) > 0:
+                chars = []
+                for c_box in char_results[0].boxes:
+                    x1_c, y1_c, x2_c, y2_c = c_box.xyxy[0]
+                    cls_idx = int(c_box.cls[0])
+                    char_val = state.char_model.names[cls_idx]
+                    chars.append({'val': char_val, 'x': (x1_c + x2_c) / 2, 'y': (y1_c + y2_c) / 2})
+                if chars:
+                    y_coords = [c['y'] for c in chars]
+                    min_y, max_y = min(y_coords), max(y_coords)
+                    is_two_line = (max_y - min_y) > (plate_crop.shape[0] / 4)
+                    if is_two_line:
+                        mid_y = (min_y + max_y) / 2
+                        line1 = sorted([c for c in chars if c['y'] < mid_y], key=lambda c: c['x'])
+                        line2 = sorted([c for c in chars if c['y'] >= mid_y], key=lambda c: c['x'])
+                        plate_text = "".join([c['val'] for c in line1]) + "".join([c['val'] for c in line2])
+                    else:
+                        chars.sort(key=lambda c: c['x'])
+                        plate_text = "".join([c['val'] for c in chars])
         
         if not plate_text:
             return {
@@ -860,15 +1015,6 @@ async def video_feed(gate_id: int = 1):
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 # ── Hardware Trigger ────────────────────────────────────────────────────────
-@app.post("/api/hardware/open_manual/{gate_id}", tags=["Hardware"])
-async def open_manual(gate_id: int):
-    """Bảo vệ mở cổng thủ công không qua AI, không lưu lịch sử"""
-    # 1. Phát lệnh mở mạch phần cứng
-    open_gate_http(gate_id)
-    
-    return {"success": True, "message": f"Đã mở cổng {1 if gate_id == 1 else 2} thủ công"}
-
-
 @app.post("/api/iot/trigger", tags=["Hardware"])
 async def iot_trigger(gate: str = "in"):
     return await hardware_trigger(gate)
@@ -1341,18 +1487,20 @@ async def websocket_live(websocket: WebSocket):
 
 # ── Config ──────────────────────────────────────────────────────────────────
 class ConfigSystem(BaseModel):
-    gate1_ip: str = "192.168.0.102"
-    gate2_ip: str = "192.168.0.102"
+    gate1_ip: str = "192.168.137.55"
+    gate2_ip: str = "192.168.137.142"
+    esp8266_ip: str = "192.168.137.145"
     com_port: str = "COM3"
 
 @app.post("/api/config/system", tags=["Config"])
 async def set_config(body: ConfigSystem):
-    """Cập nhật toàn bộ cấu hình hệ thống từ giao diện (gate1_ip, gate2_ip, com_port)"""
+    """Cập nhật toàn bộ cấu hình hệ thống: IP Camera, IP ESP8266, COM port"""
     state.gates[1].ip = body.gate1_ip
     state.gates[2].ip = body.gate2_ip
+    state.esp8266_ip = body.esp8266_ip
     state.com_port = body.com_port
-    save_config()  # Lưu xuống file config.json
-    print(f"[CONFIG] Đã cập nhật: Gate1={body.gate1_ip}, Gate2={body.gate2_ip}, COM={body.com_port}")
+    save_config()
+    print(f"[CONFIG] Đã cập nhật: Gate1={body.gate1_ip}, Gate2={body.gate2_ip}, ESP={body.esp8266_ip}")
     return {"success": True, "message": "Đã lưu cấu hình hệ thống"}
 
 
@@ -1370,74 +1518,237 @@ async def set_camera_source(body: ConfigSource):
     return {"success": True, "message": f"Đã chuyển sang: {state.camera_source}"}
 
 
-# ─── Giao tiếp Phần cứng (ESP8266) ───────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+#  GIAO TIẾP 2 CHIỀU VỚI ESP8266
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── 1. ESP8266 PUSH dữ liệu cảm biến lên Server ─────────────────────────────
 class HardwareStatus(BaseModel):
-    sensors: List[int] # [S1, S2, S3, S4, S5] (0: Trống, 1: Có xe)
-    gate_trigger: int   # 0: Không, 1: Gate1, 2: Gate2
+    sensors: List[int]    # [S1, S2, S3, S4, S5] – 0: Trống, 1: Có xe
+    gate_trigger: int = 0 # 0: Không, 1: Cổng Vào, 2: Cổng Ra
+    ip: Optional[str] = None  # ESP tự báo IP của nó (tuỳ chọn)
 
 @app.post("/api/hardware/status", tags=["Hardware"])
 async def update_hardware_status(body: HardwareStatus):
-    """Cập nhật trạng thái cảm biến và xử lý trigger mở cổng"""
+    """
+    ESP8266 gửi POST định kỳ (mỗi 1-2 giây) với dữ liệu cảm biến.
+    Server:
+      - Cập nhật trạng thái cảm biến vào state
+      - Xử lý trigger nhận diện biển số nếu có
+      - Trả về lệnh cần thực thi (open_gate) để ESP đọc ngay trong response
+    """
+    # Cập nhật trạng thái ESP
+    esp_state.connected = True
+    esp_state.last_seen = time.time()
+    if body.ip:
+        state.esp8266_ip = body.ip
+
+    # Cập nhật cảm biến vào state
     state.sensor_states = body.sensors
-    
-    response = {"status": "ok", "open_gate": 0}
+    esp_state.sensor_data = {
+        "sensors": body.sensors,
+        "gate_trigger": body.gate_trigger,
+        "timestamp": time.strftime("%H:%M:%S")
+    }
 
-    # Kiểm tra hàng đợi lệnh mở cổng từ visitor/pay
-    if state.pending_open_gates:
+    response = {"status": "ok", "open_gate": 0, "cmd": "none"}
+
+    # Kiểm tra hàng đợi lệnh (từ visitor/pay hoặc mở thủ công)
+    if esp_state.command_queue:
+        cmd = esp_state.command_queue.pop(0)
+        response["open_gate"] = cmd.get("gate", 0)
+        response["cmd"] = cmd.get("cmd", "none")
+        print(f"[ESP] Trả lệnh từ queue: open_gate={response['open_gate']}")
+    elif state.pending_open_gates:
         response["open_gate"] = state.pending_open_gates.pop(0)
+        response["cmd"] = "open"
 
-    # 1. Phát sóng trạng thái cảm biến tới Frontend ngay lập tức
-    asyncio.run(broadcast_detection({
+    # Phát sóng trạng thái cảm biến tới Frontend (dùng asyncio.create_task – không block)
+    asyncio.create_task(broadcast_detection({
         "type": "hardware_update",
         "sensors": body.sensors,
+        "esp_online": True,
         "timestamp": time.strftime("%H:%M:%S")
     }))
 
-    # 2. Xử lý trigger nhận diện biển số (Mở cổng tự động)
-    if body.gate_trigger > 0:
+    # Xử lý trigger nhận diện biển số (chỉ khi chưa có lệnh mở cổng từ queue)
+    if body.gate_trigger > 0 and response["cmd"] == "none":
         g_id = body.gate_trigger
-        gate = state.gates.get(g_id)
-        if gate and gate.latest_frame is not None:
-            print(f"[HARDWARE] Nhận Trigger từ Cổng {g_id}. Đang quét biển số...")
-            
-            # Sử dụng AI worker logic thu gọn để xử lý nhanh
-            res = process_frame_core(gate.latest_frame, demo_mode=False)
-            
+        gate_obj = state.gates.get(g_id)
+        if gate_obj and gate_obj.latest_frame is not None:
+            print(f"[HARDWARE] Trigger cổng {g_id} – quét biển số...")
+            res = process_frame_core(gate_obj.latest_frame)
+
             if res.get("is_resident"):
-                print(f"  ✅ Khớp cư dân: {res['plate']}. Gửi lệnh mở cổng!")
+                print(f"  ✅ Cư dân: {res['plate']} → MỞ CỔNG {g_id}")
                 response["open_gate"] = g_id
-                
-                # Ghi lịch sử kèm Gate ID
-                insert_history(res['plate'], res['trang_thai'], res['plate_crop_base64'], gate_id=g_id)
-                
-                # Gửi thông tin nhận diện tới Dashboard
-                asyncio.run(broadcast_detection({
-                    **res, 
-                    "gate_id": g_id, 
+                response["cmd"] = "open"
+                trang_thai = "Vao" if g_id == 1 else "Ra"
+                insert_history(res['plate'], trang_thai, res.get('plate_crop_base64', ''), gate_id=g_id)
+                asyncio.create_task(broadcast_detection({
+                    **res,
+                    "gate_id": g_id,
                     "gate_name": "Làn Vào" if g_id == 1 else "Làn Ra",
-                    "image": f"data:image/jpeg;base64,{res['plate_crop_base64']}"
+                    "image": f"data:image/jpeg;base64,{res.get('plate_crop_base64', '')}"
                 }))
             else:
-                print(f"  ❌ Từ chối: {res.get('plate') or 'Không nhận diện được'}")
+                print(f"  ❌ Từ chối: {res.get('plate') or 'Không đọc được biển'}")
                 if res.get("plate"):
-                    insert_history(res['plate'], "Tu choi", res['plate_crop_base64'], gate_id=g_id)
+                    insert_history(res['plate'], "Tu choi", res.get('plate_crop_base64', ''), gate_id=g_id)
 
-    # 3. Cập nhật trạng thái ô đỗ vào DB để lưu trữ lâu dài
+    # Cập nhật ô đỗ xe vào DB
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # Lấy giờ Việt Nam (ICT) Naive
                 vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
-                # Cấu trúc Sensors từ ESP gửi lên: [S_Vao, S_Ra, Slot1, Slot2, Slot3]
-                # Cảm biến 3, 4, 5 (index 2, 3, 4) tương ứng ô đỗ 1, 2, 3
-                for i in range(2, 5): 
-                    cur.execute("UPDATE parking_slots SET status=%s, updated_at=%s WHERE slot_id=%s", 
-                                (bool(body.sensors[i]), vn_now, i-1))
+                for i in range(2, min(5, len(body.sensors))):
+                    cur.execute(
+                        "UPDATE parking_slots SET status=%s, updated_at=%s WHERE slot_id=%s",
+                        (bool(body.sensors[i]), vn_now, i - 1)
+                    )
                 conn.commit()
     except Exception as e:
         print(f"[DB] Cập nhật ô đỗ lỗi: {e}")
 
     return response
+
+
+# ── 2. ESP8266 POLL lệnh từ Server (thay thế cho Push nếu ESP không dùng POST) ─
+@app.get("/api/esp/poll", tags=["Hardware"])
+async def esp_poll():
+    """
+    ESP8266 gọi GET endpoint này định kỳ để lấy lệnh từ server.
+    Trả về lệnh tiếp theo trong queue (nếu có).
+    
+    ESP Arduino code:
+        HTTPClient http;
+        http.begin("http://SERVER_IP:8000/api/esp/poll");
+        int code = http.GET();
+        String payload = http.getString();
+        // Parse JSON: {"cmd":"open","gate":1} hoặc {"cmd":"none"}
+    """
+    esp_state.connected = True
+    esp_state.last_seen = time.time()
+
+    if esp_state.command_queue:
+        cmd = esp_state.command_queue.pop(0)
+        print(f"[ESP-POLL] Trả lệnh: {cmd}")
+        return {"cmd": cmd.get("cmd", "none"), "gate": cmd.get("gate", 0)}
+
+    return {"cmd": "none", "gate": 0}
+
+
+# ── 3. ESP8266 gửi Heartbeat (giữ kết nối) ─────────────────────────────────
+@app.get("/api/esp/heartbeat", tags=["Hardware"])
+async def esp_heartbeat(ip: Optional[str] = None):
+    """
+    ESP8266 gọi GET này mỗi vài giây để báo hiệu đang online.
+    Server trả về thời gian hiện tại và lệnh nếu có.
+    
+    ESP Arduino code:
+        String url = "http://SERVER_IP:8000/api/esp/heartbeat?ip=" + WiFi.localIP().toString();
+        http.begin(url);
+        http.GET();
+    """
+    esp_state.connected = True
+    esp_state.last_seen = time.time()
+    if ip:
+        state.esp8266_ip = ip
+        print(f"[ESP-HB] Heartbeat từ ESP8266 @ {ip}")
+
+    # Kiểm tra có lệnh chờ không
+    pending_cmd = {"cmd": "none", "gate": 0}
+    if esp_state.command_queue:
+        cmd = esp_state.command_queue.pop(0)
+        pending_cmd = {"cmd": cmd.get("cmd", "none"), "gate": cmd.get("gate", 0)}
+
+    return {
+        "status": "ok",
+        "server_time": time.strftime("%H:%M:%S"),
+        **pending_cmd
+    }
+
+
+# ── 4. ESP8266 gửi kết quả nhận diện thủ công ────────────────────────────────
+class ESPDetectReport(BaseModel):
+    gate_id: int          # 1: Vào, 2: Ra
+    plate: str            # Biển số ESP đọc được (nếu có OCR trên ESP)
+    sensor_trigger: int = 0  # Cảm biến nào kích hoạt
+    image_b64: Optional[str] = None  # Ảnh base64 (nếu ESP32-CAM gửi kèm)
+
+@app.post("/api/esp/report", tags=["Hardware"])
+async def esp_report(body: ESPDetectReport):
+    """
+    ESP/ESP32-CAM chủ động báo cáo kết quả về server.
+    Server kiểm tra DB và trả về lệnh mở/đóng cổng.
+    """
+    esp_state.connected = True
+    esp_state.last_seen = time.time()
+
+    plate = normalize_plate(body.plate)
+    gate_id = body.gate_id
+    print(f"[ESP-REPORT] Cổng {gate_id} phát hiện biển: '{plate}'")
+
+    if not plate:
+        return {"action": "deny", "reason": "Biển số rỗng"}
+
+    # Kiểm tra DB
+    resident = check_plate_in_db(plate)
+    if not resident:
+        # Thử fuzzy match
+        all_res = get_all_residents_for_fuzzy()
+        for norm, original, owner in all_res:
+            ratio = difflib.SequenceMatcher(None, normalize_plate(plate), norm).ratio()
+            if ratio > 0.8:
+                resident = {"bien_so_xe": original, "ten_chu_xe": owner}
+                plate = normalize_plate(original)
+                break
+
+    is_resident = resident is not None
+    trang_thai = ("Vao" if gate_id == 1 else "Ra") if is_resident else "Tu choi"
+    action = "open" if is_resident else "deny"
+
+    # Ghi lịch sử
+    insert_history(plate, trang_thai, body.image_b64 or "", gate_id=gate_id)
+
+    # Broadcast UI
+    await broadcast_detection({
+        "type": "detection",
+        "gate_id": gate_id,
+        "gate_name": "Làn Vào" if gate_id == 1 else "Làn Ra",
+        "plate": plate,
+        "owner": resident["ten_chu_xe"] if resident else "Không xác định",
+        "is_resident": is_resident,
+        "trang_thai": trang_thai,
+        "action": action,
+        "processed": True,
+        "timestamp": time.strftime("%H:%M:%S"),
+        "image": f"data:image/jpeg;base64,{body.image_b64}" if body.image_b64 else None
+    })
+
+    return {
+        "action": action,
+        "plate": plate,
+        "owner": resident["ten_chu_xe"] if resident else None,
+        "trang_thai": trang_thai
+    }
+
+
+# ── 5. Lấy trạng thái ESP8266 hiện tại ──────────────────────────────────────
+@app.get("/api/esp/status", tags=["Hardware"])
+async def get_esp_status():
+    """
+    Frontend gọi để biết ESP8266 đang online/offline.
+    """
+    offline_threshold = 30  # giây không nhận tín hiệu → coi là offline
+    is_online = esp_state.connected and (time.time() - esp_state.last_seen < offline_threshold)
+    return {
+        "esp_ip": state.esp8266_ip,
+        "online": is_online,
+        "last_seen": time.strftime("%H:%M:%S", time.localtime(esp_state.last_seen)) if esp_state.last_seen else None,
+        "sensors": esp_state.sensor_data.get("sensors", []),
+        "pending_commands": len(esp_state.command_queue)
+    }
 
 @app.post("/api/hardware/open_manual/{gate_id}", tags=["Hardware"])
 async def open_manual(gate_id: int):
@@ -1573,19 +1884,7 @@ async def set_fees(body: FeeConfig):
     return {"success": True, "visitor_fee": VISITOR_FLAT_FEE}
 
 
-class ConfigRequest(BaseModel):
-    gate1_ip: str
-    gate2_ip: str
-    esp8266_ip: str
-
-@app.post("/api/config/system", tags=["Config"])
-async def update_system_config(body: ConfigRequest):
-    """Cập nhật cấu hình hệ thống: IP Camera và IP Hardware (ESP8266)"""
-    state.gates[1].ip = body.gate1_ip
-    state.gates[2].ip = body.gate2_ip
-    state.esp8266_ip = body.esp8266_ip
-    save_config()
-    return {"success": True, "message": "Đã lưu cấu hình hệ thống"}
+# Note: /api/config/system đã được định nghĩa ở trên với ConfigRequest (gate1_ip, gate2_ip, esp8266_ip)
 
 
 # 5. Kiểm tra và nạp cư dân từ Git Sync (nếu có)
