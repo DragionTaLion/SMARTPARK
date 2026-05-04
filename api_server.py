@@ -112,12 +112,13 @@ def import_residents_from_json():
                 print("[SYNC] Nạp cư dân thành công!")
     except Exception as e:
         print(f"[SYNC] Lỗi nạp cư dân: {e}")
-PARKING_CAPACITY = 3
+RESIDENT_CAPACITY = 2   # Số chỗ dành riêng cho cư dân
+VISITOR_CAPACITY = 1    # Số chỗ dành riêng cho xe vãng lai
 COOLDOWN_SECONDS = 5
 CONFIDENCE_THRESHOLD = 0.3
 MONTHLY_FEE = 500000
-VISITOR_FLAT_FEE = 20000 # 20k/lượt
-FREE_MINUTES = 30         # Miễn phí 30p đầu
+VISITOR_FLAT_FEE = 20000 
+FREE_MINUTES = 30         
 
 # ─── State toàn cục ────────────────────────────────────────────────────────
 class GateState:
@@ -311,6 +312,9 @@ async def lifespan(app: FastAPI):
     print("\n" + "=" * 60)
     print("  KHOI DONG SMARTPARK V2 SERVER")
     print("=" * 60)
+
+    # Lưu event loop chính để dùng trong các thread khác
+    state.main_loop = asyncio.get_running_loop()
 
     # ── Bước 0: Khởi tạo DB schema (tạo bảng/cột còn thiếu) ──
     print("\n  [DB] Kiểm tra schema database...")
@@ -536,7 +540,6 @@ def get_current_parking_count() -> int:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # Logic đơn giản: đếm các xe có trạng thái cuối cùng là 'Vao'
                 cur.execute("""
                     WITH last_status AS (
                         SELECT bien_so_xe, trang_thai,
@@ -547,6 +550,56 @@ def get_current_parking_count() -> int:
                 """)
                 return cur.fetchone()['count']
     except Exception:
+        return 0
+
+
+def get_resident_in_lot_count() -> int:
+    """Đếm số xe CƯ DÂN đang trong bãi (biển số có trong bảng cudan + trạng thái cuối = Vao)"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    WITH last_status AS (
+                        SELECT bien_so_xe, trang_thai,
+                        ROW_NUMBER() OVER(PARTITION BY bien_so_xe ORDER BY thoi_gian DESC) as rn
+                        FROM lichsuravao
+                    )
+                    SELECT COUNT(*) as count FROM last_status ls
+                    WHERE ls.rn = 1 AND ls.trang_thai = 'Vao'
+                    AND EXISTS (
+                        SELECT 1 FROM cudan c
+                        WHERE UPPER(REGEXP_REPLACE(c.bien_so_xe, '[.\\-\\s_]', '', 'g'))
+                            = UPPER(REGEXP_REPLACE(ls.bien_so_xe, '[.\\-\\s_]', '', 'g'))
+                    )
+                """)
+                return cur.fetchone()['count']
+    except Exception as e:
+        print(f"[DB] get_resident_in_lot_count error: {e}")
+        return 0
+
+
+def get_visitor_in_lot_count() -> int:
+    """Đếm số xe VÃNG LAI đang trong bãi (biển số KHÔNG có trong bảng cudan + trạng thái cuối = Vao)"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    WITH last_status AS (
+                        SELECT bien_so_xe, trang_thai,
+                        ROW_NUMBER() OVER(PARTITION BY bien_so_xe ORDER BY thoi_gian DESC) as rn
+                        FROM lichsuravao
+                    )
+                    SELECT COUNT(*) as count FROM last_status ls
+                    WHERE ls.rn = 1 AND ls.trang_thai = 'Vao'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM cudan c
+                        WHERE UPPER(REGEXP_REPLACE(c.bien_so_xe, '[.\\-\\s_]', '', 'g'))
+                            = UPPER(REGEXP_REPLACE(ls.bien_so_xe, '[.\\-\\s_]', '', 'g'))
+                    )
+                """)
+                return cur.fetchone()['count']
+    except Exception as e:
+        print(f"[DB] get_visitor_in_lot_count error: {e}")
         return 0
 
 def get_entry_image(plate: str) -> Optional[str]:
@@ -1021,17 +1074,18 @@ async def iot_trigger(gate: str = "in"):
 
 @app.post("/api/trigger", tags=["Hardware"])
 async def hardware_trigger(gate: str = "in"):
-    """Cổng kết nối thực tế dành cho ESP8266/ESP32-CAM"""
+    """Cổng kết nối thực tế dành cho ESP8266/ESP32-CAM
+    Logic quota cố định:
+      - Cư dân: tối đa RESIDENT_CAPACITY chỗ
+      - Vãng lai: tối đa VISITOR_CAPACITY chỗ
+    """
     gate_id = 1 if gate == "in" else 2
     gate_obj = state.gates.get(gate_id)
     
     if not gate_obj or gate_obj.latest_frame is None:
         return {"action": "deny", "reason": "Camera chưa sẵn sàng"}
 
-    occupied = get_current_parking_count()
-    if gate == "in" and occupied >= PARKING_CAPACITY:
-        return {"action": "deny", "reason": "Bãi xe đã đầy"}
-
+    # ── Bước 1: Nhận diện biển số trước ──
     frame = gate_obj.latest_frame.copy()
     result = process_frame_core(frame)
 
@@ -1040,6 +1094,25 @@ async def hardware_trigger(gate: str = "in"):
 
     plate = result.get("plate")
     is_resident = result.get("is_resident", False)
+
+    # ── Bước 2: Kiểm tra quota khi xe VÀO ──
+    if gate == "in":
+        if is_resident:
+            # Cư dân: kiểm tra quota cư dân
+            resident_count = get_resident_in_lot_count()
+            if resident_count >= RESIDENT_CAPACITY:
+                print(f"[QUOTA] ❌ Cư dân {plate} bị chặn: {resident_count}/{RESIDENT_CAPACITY} chỗ cư dân đã đầy")
+                return {"action": "deny", "reason": f"Hết chỗ cư dân ({resident_count}/{RESIDENT_CAPACITY})"}
+            print(f"[QUOTA] ✅ Cư dân {plate} được vào: {resident_count}/{RESIDENT_CAPACITY}")
+        else:
+            # Vãng lai: kiểm tra quota vãng lai
+            visitor_count = get_visitor_in_lot_count()
+            if visitor_count >= VISITOR_CAPACITY:
+                print(f"[QUOTA] ❌ Xe lạ {plate} bị chặn: {visitor_count}/{VISITOR_CAPACITY} chỗ vãng lai đã đầy")
+                return {"action": "deny", "reason": f"Hết chỗ vãng lai ({visitor_count}/{VISITOR_CAPACITY})"}
+            print(f"[QUOTA] ✅ Xe lạ {plate} được vào: {visitor_count}/{VISITOR_CAPACITY}")
+
+    # ── Bước 3: Quyết định mở/đóng cổng ──
     action = "open" if is_resident or gate == "in" else "deny"
 
     # 💡 LƯU Ý QUAN TRỌNG: 
@@ -1052,7 +1125,8 @@ async def hardware_trigger(gate: str = "in"):
     await broadcast_detection(result)
     
     # Ghi log
-    insert_history(plate, "Vao" if gate == "in" else "Ra", result.get("image", ""), gate_id=gate_id)
+    trang_thai = "Vao" if gate == "in" else "Ra"
+    insert_history(plate, trang_thai, result.get("plate_crop_base64", ""), gate_id=gate_id)
 
     return {"action": action, "plate": plate, "owner": result.get("owner")}
 
@@ -1569,7 +1643,7 @@ async def update_hardware_status(body: HardwareStatus):
         "sensors": body.sensors,
         "esp_online": True,
         "timestamp": time.strftime("%H:%M:%S")
-    })
+    }))
 
     # Xử lý trigger nhận diện biển số (chỉ khi chưa có lệnh mở cổng từ queue)
     if body.gate_trigger > 0 and response["cmd"] == "none":
