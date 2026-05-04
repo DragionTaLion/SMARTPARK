@@ -96,9 +96,9 @@ export default function App() {
   const [scanningForRegistration, setScanningForRegistration] = useState(false);
   const [addError, setAddError] = useState('');
   const [cameraMode, setCameraMode] = useState<'webcam' | 'esp32'>('esp32');
-  const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.0.102');
-  const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.0.102');
-  const [esp8266Ip, setEsp8266Ip] = useState(() => localStorage.getItem('smartpark_esp8266_ip') || '192.168.0.105');
+  const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.137.189');
+  const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.137.93');
+  const [esp8266Ip, setEsp8266Ip] = useState(() => localStorage.getItem('smartpark_esp8266_ip') || '192.168.137.58');
   const [sensorStates, setSensorStates] = useState<number[]>([0, 0, 0, 0, 0]);
   const [parkingSlots, setParkingSlots] = useState<ParkingSlot[]>([
     { slot_id: 1, slot_name: 'Ô số 1', status: false },
@@ -773,7 +773,7 @@ export default function App() {
                       <button onClick={() => handleManualOpen(1)} className="bg-emerald-50 text-emerald-600 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase hover:bg-emerald-100 transition-all border border-emerald-100">Bấm Mở</button>
                     </div>
                     <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-inner border-2 border-slate-50">
-                      <img src={cameraMode === 'esp32' ? `http://${gate1Ip}:81/stream` : '/api/video_feed'} className="w-full h-full object-cover" alt="Gate 1" />
+                      <img src={`http://localhost:8000/api/video_feed?gate_id=1`} className="w-full h-full object-cover" alt="Gate 1" />
                     </div>
                   </div>
 
@@ -787,7 +787,7 @@ export default function App() {
                       <button onClick={() => handleManualOpen(2)} className="bg-orange-50 text-orange-600 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase hover:bg-orange-100 transition-all border border-orange-100">Bấm Mở</button>
                     </div>
                     <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-inner border-2 border-slate-50">
-                      <img src={cameraMode === 'esp32' ? `http://${gate2Ip}:81/stream` : '/api/video_feed'} className="w-full h-full object-cover" alt="Gate 2" />
+                      <img src={`http://localhost:8000/api/video_feed?gate_id=2`} className="w-full h-full object-cover" alt="Gate 2" />
                     </div>
                   </div>
 
