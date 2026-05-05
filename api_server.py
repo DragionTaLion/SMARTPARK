@@ -53,14 +53,15 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         pass
 
 # ─── Cấu hình ──────────────────────────────────────────────────────────────
-MODEL_PATH = "runs/detect/HeThongBarrier/Plate_Detection_v12/weights/best.pt"  # Path v4.0 (fallback: data/models/plate_detect.pt)
-CHAR_MODEL_PATH = "runs/classify/data/models/char_model/weights/best.pt"  # Path v4.0 (fallback: data/models/char_model/weights/best.pt)
+MODEL_PATH = "data/models/plate_detect.pt"
+CHAR_MODEL_PATH = "data/models/char_model/weights/best.pt"
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  CẤU HÌNH DATABASE & ĐỒNG BỘ GIT-SYNC
 # ═══════════════════════════════════════════════════════════════════════════
 DB_CONFIG = {
     "host": "localhost",
-    "port": 55432,  # Docker container port
+    "port": 54321,
     "dbname": "nhan_dien_bien_so_xe",
     "user": "postgres",
     "password": "postgres",
@@ -553,7 +554,6 @@ def get_current_parking_count() -> int:
     except Exception:
         return 0
 
-
 def get_resident_in_lot_count() -> int:
     """Đếm số xe CƯ DÂN đang trong bãi (biển số có trong bảng cudan + trạng thái cuối = Vao)"""
     try:
@@ -861,9 +861,10 @@ def detect_worker(gate_id: int):
     """Luồng nhận diện tự động chuyên biệt cho từng cổng"""
     gate = state.gates.get(gate_id)
     if not gate: return
-    
+
     print(f"[AI-WORKER-{gate_id}] Bắt đầu nhận diện cho lối { 'VÀO' if gate_id==1 else 'RA' }")
     
+
     while state.is_running and gate.camera_active:
         if gate.latest_frame is None or state.yolo_model is None:
             time.sleep(0.5)
@@ -1417,6 +1418,7 @@ async def toggle_payment(resident_id: int):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.delete("/api/revenue/{revenue_id}", tags=["Revenue"])
 async def delete_revenue(revenue_id: int):
     """Xóa một bản ghi doanh thu (dùng để dọn dẹp dữ liệu giả lập/sai)."""
@@ -1686,6 +1688,22 @@ async def update_hardware_status(body: HardwareStatus):
         print(f"[DB] Cập nhật ô đỗ lỗi: {e}")
 
     return response
+
+
+# ── 6. Lấy trạng thái ô đỗ xe hiện tại ──────────────────────────────────────
+@app.get("/api/parking/slots", tags=["Hardware"])
+async def get_parking_slots():
+    """
+    Frontend gọi để lấy trạng thái tất cả ô đỗ từ Database.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT slot_id, status FROM parking_slots ORDER BY slot_id")
+                rows = cur.fetchall()
+                return [{"slot_id": r["slot_id"], "slot_name": f"Ô số {r['slot_id']}", "status": r["status"]} for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── 2. ESP8266 POLL lệnh từ Server (thay thế cho Push nếu ESP không dùng POST) ─
