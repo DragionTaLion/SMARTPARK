@@ -41,6 +41,7 @@ from pydantic import BaseModel
 import requests
 import threading
 import serial
+import math
 
 # ─── Fix encoding Windows ───────────────────────────────────────────────────
 
@@ -54,6 +55,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 # ─── Cấu hình ──────────────────────────────────────────────────────────────
 MODEL_PATH = "data/models/plate_detect.pt"
 CHAR_MODEL_PATH = "data/models/char_model/weights/best.pt"
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  CẤU HÌNH DATABASE & ĐỒNG BỘ GIT-SYNC
 # ═══════════════════════════════════════════════════════════════════════════
@@ -552,7 +554,6 @@ def get_current_parking_count() -> int:
     except Exception:
         return 0
 
-
 def get_resident_in_lot_count() -> int:
     """Đếm số xe CƯ DÂN đang trong bãi (biển số có trong bảng cudan + trạng thái cuối = Vao)"""
     try:
@@ -860,9 +861,10 @@ def detect_worker(gate_id: int):
     """Luồng nhận diện tự động chuyên biệt cho từng cổng"""
     gate = state.gates.get(gate_id)
     if not gate: return
-    
+
     print(f"[AI-WORKER-{gate_id}] Bắt đầu nhận diện cho lối { 'VÀO' if gate_id==1 else 'RA' }")
     
+
     while state.is_running and gate.camera_active:
         if gate.latest_frame is None or state.yolo_model is None:
             time.sleep(0.5)
@@ -1415,6 +1417,7 @@ async def toggle_payment(resident_id: int):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.delete("/api/revenue/{revenue_id}", tags=["Revenue"])
 async def delete_revenue(revenue_id: int):

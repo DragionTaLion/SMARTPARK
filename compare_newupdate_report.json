@@ -1,0 +1,83 @@
+{
+  "only_in_current": [
+    "hardware/barrier_control/arduino_barrier.ino"
+  ],
+  "only_in_newupdate": [
+    "config.json",
+    "data/residents_sync.json",
+    "docs/smartpark_tech_deep_dive.md",
+    "docs/smartpark_technical_report.md",
+    "docs/web_features_specification_v2.md",
+    "hardware/esp32_cam/CameraWebServer.ino",
+    "hardware/esp32_cam/app_httpd.cpp",
+    "hardware/esp32_cam/board_config.h",
+    "hardware/esp32_cam/camera_index.h",
+    "hardware/esp32_cam/camera_pins.h",
+    "hardware/esp32_cam/ci.yml",
+    "hardware/esp8266_barrier/esp8266_barrier.ino",
+    "hardware/esp8266_barrier/esp8266_barrier_webserver_new.ino",
+    "scratch/check_schema.py",
+    "scripts/migrate_db_v2.py",
+    "scripts/migrate_revenue.py",
+    "scripts/migrate_v2.py",
+    "servocambienhongngoai/servocambienhongngoai.ino"
+  ],
+  "modified": [
+    {
+      "file": "api_server.py",
+      "type": "text_diff",
+      "added_lines": 1897,
+      "removed_lines": 396
+    },
+    {
+      "file": "docker/docker-compose.yml",
+      "type": "text_diff",
+      "added_lines": 1,
+      "removed_lines": 1
+    },
+    {
+      "file": "index.html",
+      "type": "text_diff",
+      "added_lines": 12,
+      "removed_lines": 10
+    },
+    {
+      "file": "scripts/fix_db.py",
+      "type": "text_diff",
+      "added_lines": 25,
+      "removed_lines": 2
+    },
+    {
+      "file": "src/App.tsx",
+      "type": "text_diff",
+      "added_lines": 1308,
+      "removed_lines": 394
+    },
+    {
+      "file": "src/index.css",
+      "type": "text_diff",
+      "added_lines": 24,
+      "removed_lines": 11
+    },
+    {
+      "file": "start.ps1",
+      "type": "text_diff",
+      "added_lines": 6,
+      "removed_lines": 4
+    },
+    {
+      "file": "vite.config.ts",
+      "type": "text_diff",
+      "added_lines": 3,
+      "removed_lines": 0
+    }
+  ],
+  "summary": {
+    "tracked_current": 57,
+    "tracked_newupdate": 74,
+    "only_current": 1,
+    "only_newupdate": 18,
+    "modified": 8,
+    "identical_common": 48
+  }
+}

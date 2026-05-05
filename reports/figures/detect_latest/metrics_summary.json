@@ -1,0 +1,10 @@
+{
+  "task": "detect",
+  "run_dir": "D:\\PBL5\\runs\\detect\\HeThongBarrier\\Plate_Detection_v12",
+  "figures_dir": "D:\\PBL5\\reports\\figures\\detect_latest",
+  "best_f1": 0.9773848663186366,
+  "best_precision": 0.95577,
+  "best_recall": 1.0,
+  "best_map50": 0.9721,
+  "best_map50_95": 0.70479
+}

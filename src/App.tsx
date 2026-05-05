@@ -96,9 +96,11 @@ export default function App() {
   const [scanningForRegistration, setScanningForRegistration] = useState(false);
   const [addError, setAddError] = useState('');
   const [cameraMode, setCameraMode] = useState<'webcam' | 'esp32'>('esp32');
+
   const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.137.81');
   const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.137.94');
   const [esp8266Ip, setEsp8266Ip] = useState(() => localStorage.getItem('smartpark_esp8266_ip') || '192.168.137.32');
+
   const [sensorStates, setSensorStates] = useState<number[]>([0, 0, 0, 0, 0]);
   const [parkingSlots, setParkingSlots] = useState<ParkingSlot[]>([
     { slot_id: 1, slot_name: 'Ô số 1', status: false },
@@ -380,7 +382,9 @@ export default function App() {
     const statInterval = setInterval(() => {
       loadStats();
       checkHealth();
+
       loadParkingSlots();
+
     }, 15_000);
 
     return () => {
@@ -786,6 +790,7 @@ export default function App() {
                     <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-inner border-2 border-slate-50">
                       <img src={`http://localhost:8000/api/video_feed?gate_id=1`} className="w-full h-full object-cover" alt="Gate 1" />
                     </div>
+
                   </div>
 
                   {/* Gate 2 Feed */}
@@ -807,6 +812,7 @@ export default function App() {
                     <ParkingMap slots={parkingSlots} />
                   </div>
 
+
                   {/* System Pulse Card */}
                   <div className="p-6 rounded-[2.5rem] bg-slate-900 text-white shadow-2xl relative overflow-hidden">
                     <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/20 rounded-full -mr-10 -mt-10 blur-2xl" />
@@ -825,6 +831,7 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+
                   </div>
                 </div>
               </div>
@@ -843,10 +850,31 @@ export default function App() {
                 <div className="grid grid-cols-1 gap-8">
                   <div className="col-span-1">
                     <ParkingMap slots={parkingSlots} />
+>
                   </div>
                 </div>
               </div>
             </div>
+
+          )}
+
+          {/* ══════════ PARKING MAP (TRANG RIÊNG) ══════════ */}
+          {activeTab === 'parking_map' && (
+            <div className="flex flex-col items-center justify-center min-h-[calc(100vh-140px)]">
+              <div className="w-full max-w-4xl">
+                <div className="mb-8 text-center">
+                  <h3 className="text-3xl font-black text-slate-800 mb-2">GIÁM SÁT Ô ĐỖ THỜI GIAN THỰC</h3>
+                  <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">Hệ thống đồng bộ trực tiếp từ cảm biến</p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-8">
+                  <div className="col-span-1">
+                    <ParkingMap slots={parkingSlots} />
+                  </div>
+                </div>
+              </div>
+            </div>
+
           )}
 
           {/* ══════════ HISTORY ══════════ */}
