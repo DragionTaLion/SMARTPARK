@@ -18,17 +18,17 @@ export default defineConfig(({mode}) => {
     server: {
       port: 3000,
       host: '0.0.0.0',
+      // HMR is disabled in AI Studio via DISABLE_HMR env var.
+      // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
-      watch: {
-        ignored: ['**/data/**'],
-      },
       proxy: {
-        // Forward /api/* → FastAPI :8000
+        // Proxy tất cả /api/* → FastAPI backend
         '/api': {
           target: 'http://localhost:8000',
           changeOrigin: true,
+          secure: false,
         },
-        // Forward WebSocket /ws/* → FastAPI :8000
+        // Proxy WebSocket /ws/* → FastAPI WebSocket
         '/ws': {
           target: 'ws://localhost:8000',
           ws: true,

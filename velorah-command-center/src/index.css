@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+  --color-midnight: #0B1120;
+  --color-electric: #38BDF8;
+  --color-ghost: #F8FAFC;
+  --font-serif: "Instrument Serif", serif;
+  --font-sans: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+@layer utilities {
+  .liquid-glass {
+    @apply bg-white/5 backdrop-blur-md border border-white/10 shadow-[inset_0_0_20px_rgba(255,255,255,0.02)];
+  }
+}

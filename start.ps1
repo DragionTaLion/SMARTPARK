@@ -8,7 +8,7 @@ Write-Host "=======================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Kiểm tra FastAPI dependencies
-$deps = py -c "import fastapi, uvicorn" 2>&1
+py -c "import fastapi, uvicorn" 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[!] Dang cai dat dependencies..." -ForegroundColor Yellow
     py -m pip install fastapi "uvicorn[standard]" python-multipart pyserial --quiet
@@ -30,7 +30,8 @@ try {
     Write-Host "      YOLO: $($health.yolo)" -ForegroundColor DarkGray
     Write-Host "      GPU : $($health.gpu)" -ForegroundColor DarkGray
     Write-Host "      [OK] Backend dang chay!" -ForegroundColor Green
-} catch {
+}
+catch {
     Write-Host "      [!] Backend chua san sang, thu lai sau..." -ForegroundColor Yellow
 }
 
@@ -45,7 +46,8 @@ Write-Host ""
 
 try {
     npm run dev
-} finally {
+}
+finally {
     Write-Host ""
     Write-Host "Dang dung backend (PID $($backend.Id))..." -ForegroundColor Yellow
     Stop-Process -Id $backend.Id -ErrorAction SilentlyContinue

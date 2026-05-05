@@ -1,0 +1,158 @@
+{
+  "chars_36": {
+    "dataset": "data\\datasets\\chars_36",
+    "exists": true,
+    "splits": {
+      "train": 29232,
+      "val": 7344,
+      "test": 0,
+      "total": 36576,
+      "ratio_train": 0.7992,
+      "ratio_val": 0.2008,
+      "ratio_test": 0.0
+    },
+    "label_consistency": {
+      "expected_num_classes": 36,
+      "train_present_classes": 36,
+      "val_present_classes": 36,
+      "missing_in_train": [],
+      "missing_in_val": []
+    },
+    "class_balance": {
+      "train": {
+        "min": 812,
+        "max": 812,
+        "mean": 812.0,
+        "imbalance_ratio": 1.0
+      },
+      "val": {
+        "min": 204,
+        "max": 204,
+        "mean": 204.0,
+        "imbalance_ratio": 1.0
+      },
+      "train_counts": {
+        "0": 812,
+        "1": 812,
+        "2": 812,
+        "3": 812,
+        "4": 812,
+        "5": 812,
+        "6": 812,
+        "7": 812,
+        "8": 812,
+        "9": 812,
+        "A": 812,
+        "B": 812,
+        "C": 812,
+        "D": 812,
+        "E": 812,
+        "F": 812,
+        "G": 812,
+        "H": 812,
+        "I": 812,
+        "J": 812,
+        "K": 812,
+        "L": 812,
+        "M": 812,
+        "N": 812,
+        "O": 812,
+        "P": 812,
+        "Q": 812,
+        "R": 812,
+        "S": 812,
+        "T": 812,
+        "U": 812,
+        "V": 812,
+        "W": 812,
+        "X": 812,
+        "Y": 812,
+        "Z": 812
+      },
+      "val_counts": {
+        "0": 204,
+        "1": 204,
+        "2": 204,
+        "3": 204,
+        "4": 204,
+        "5": 204,
+        "6": 204,
+        "7": 204,
+        "8": 204,
+        "9": 204,
+        "A": 204,
+        "B": 204,
+        "C": 204,
+        "D": 204,
+        "E": 204,
+        "F": 204,
+        "G": 204,
+        "H": 204,
+        "I": 204,
+        "J": 204,
+        "K": 204,
+        "L": 204,
+        "M": 204,
+        "N": 204,
+        "O": 204,
+        "P": 204,
+        "Q": 204,
+        "R": 204,
+        "S": 204,
+        "T": 204,
+        "U": 204,
+        "V": 204,
+        "W": 204,
+        "X": 204,
+        "Y": 204,
+        "Z": 204
+      }
+    }
+  },
+  "yolo_dataset": {
+    "data_yaml": "data\\datasets\\vietnam_license_plate\\data.yaml",
+    "root": "D:\\PBL5\\data\\datasets\\vietnam_license_plate",
+    "splits": {
+      "train_images": 2083,
+      "val_images": 200,
+      "test_images": 102,
+      "total_images": 2385,
+      "ratio_train": 0.8734,
+      "ratio_val": 0.0839,
+      "ratio_test": 0.0428
+    },
+    "label_consistency": {
+      "train": {
+        "images": 2083,
+        "missing_label_files": 0,
+        "empty_label_files": 0,
+        "invalid_label_lines": 0,
+        "class_distribution": {
+          "0": 2086
+        }
+      },
+      "val": {
+        "images": 200,
+        "missing_label_files": 0,
+        "empty_label_files": 0,
+        "invalid_label_lines": 0,
+        "class_distribution": {
+          "0": 200
+        }
+      },
+      "test": {
+        "images": 102,
+        "missing_label_files": 1,
+        "empty_label_files": 0,
+        "invalid_label_lines": 0,
+        "class_distribution": {
+          "0": 101
+        }
+      }
+    }
+  },
+  "augmentation_recommendations": [
+    "Class balance tương đối ổn, dùng augment nhẹ để tăng tổng quát hóa.",
+    "Giữ tỷ lệ ký tự, tránh shear/perspective quá mạnh vì làm méo cấu trúc biển số."
+  ]
+}
