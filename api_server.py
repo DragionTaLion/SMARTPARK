@@ -134,8 +134,8 @@ class AppState:
     def __init__(self):
         # Mặc định 2 cổng
         self.gates = {
-            1: GateState(1, "192.168.137.219"), # Làn Vào
-            2: GateState(2, "192.168.137.212")  # Làn Ra
+            1: GateState(1, "192.168.137.81"), # Làn Vào
+            2: GateState(2, "192.168.137.94")  # Làn Ra
         }
         self.sensor_states = [0, 0, 0, 0, 0] # Trạng thái 5 cảm biến IR
         
@@ -149,7 +149,7 @@ class AppState:
         self.active_connections: List[WebSocket] = []
         self.ser: Optional[serial.Serial] = None
         self.com_port: str = "COM3"
-        self.esp8266_ip: str = "192.168.137.52"
+        self.esp8266_ip: str = "192.168.137.32"
         self.camera_mode: str = "esp32"
         
         # Cooldown per plate
@@ -1685,6 +1685,22 @@ async def update_hardware_status(body: HardwareStatus):
         print(f"[DB] Cập nhật ô đỗ lỗi: {e}")
 
     return response
+
+
+# ── 6. Lấy trạng thái ô đỗ xe hiện tại ──────────────────────────────────────
+@app.get("/api/parking/slots", tags=["Hardware"])
+async def get_parking_slots():
+    """
+    Frontend gọi để lấy trạng thái tất cả ô đỗ từ Database.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT slot_id, status FROM parking_slots ORDER BY slot_id")
+                rows = cur.fetchall()
+                return [{"slot_id": r["slot_id"], "slot_name": f"Ô số {r['slot_id']}", "status": r["status"]} for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── 2. ESP8266 POLL lệnh từ Server (thay thế cho Push nếu ESP không dùng POST) ─

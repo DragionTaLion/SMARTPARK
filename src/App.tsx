@@ -96,9 +96,9 @@ export default function App() {
   const [scanningForRegistration, setScanningForRegistration] = useState(false);
   const [addError, setAddError] = useState('');
   const [cameraMode, setCameraMode] = useState<'webcam' | 'esp32'>('esp32');
-  const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.137.189');
-  const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.137.93');
-  const [esp8266Ip, setEsp8266Ip] = useState(() => localStorage.getItem('smartpark_esp8266_ip') || '192.168.137.58');
+  const [gate1Ip, setGate1Ip] = useState(() => localStorage.getItem('smartpark_gate1_ip') || '192.168.137.81');
+  const [gate2Ip, setGate2Ip] = useState(() => localStorage.getItem('smartpark_gate2_ip') || '192.168.137.94');
+  const [esp8266Ip, setEsp8266Ip] = useState(() => localStorage.getItem('smartpark_esp8266_ip') || '192.168.137.32');
   const [sensorStates, setSensorStates] = useState<number[]>([0, 0, 0, 0, 0]);
   const [parkingSlots, setParkingSlots] = useState<ParkingSlot[]>([
     { slot_id: 1, slot_name: 'Ô số 1', status: false },
@@ -206,6 +206,16 @@ export default function App() {
       setResidents(data);
     } catch (e) {
       console.warn('Residents fetch fail:', e);
+    }
+  }, []);
+
+  // ── Load parking slots ────────────────────────────────────────────────────
+  const loadParkingSlots = useCallback(async () => {
+    try {
+      const data = await apiFetch<ParkingSlot[]>('/parking/slots');
+      setParkingSlots(data);
+    } catch (e) {
+      console.warn('Parking slots fetch fail:', e);
     }
   }, []);
 
@@ -370,13 +380,14 @@ export default function App() {
     const statInterval = setInterval(() => {
       loadStats();
       checkHealth();
+      loadParkingSlots();
     }, 15_000);
 
     return () => {
       clearInterval(statInterval);
       wsRef.current?.close();
     };
-  }, [checkHealth, loadStats, loadLogs, setupWebSocket]);
+  }, [checkHealth, loadStats, loadLogs, loadResidents, loadParkingSlots, setupWebSocket]);
 
   // Tải dữ liệu riêng cho từng Tab khi chuyển sang
   useEffect(() => {
@@ -789,6 +800,11 @@ export default function App() {
                     <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-inner border-2 border-slate-50">
                       <img src={`http://localhost:8000/api/video_feed?gate_id=2`} className="w-full h-full object-cover" alt="Gate 2" />
                     </div>
+                  </div>
+
+                  {/* Real-time Parking Map on Dashboard */}
+                  <div className="animate-in fade-in slide-in-from-right-4 duration-1000 delay-300">
+                    <ParkingMap slots={parkingSlots} />
                   </div>
 
                   {/* System Pulse Card */}
