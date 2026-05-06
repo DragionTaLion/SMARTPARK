@@ -538,7 +538,7 @@ export default function App() {
   // ── Filtered logs ─────────────────────────────────────────────────────────
   const filteredLogs = logs.filter(l => {
     const matchesSearch = !searchQuery || l.bien_so_xe.toLowerCase().includes(searchQuery.toLowerCase());
-    
+
     let matchesFilter = false;
     if (logFilter === 'all') {
       matchesFilter = true;
@@ -549,7 +549,7 @@ export default function App() {
       // Lọc theo trạng thái Vao/Ra/Tu choi
       matchesFilter = l.trang_thai === logFilter;
     }
-    
+
     return matchesSearch && matchesFilter;
   });
 
@@ -850,7 +850,7 @@ export default function App() {
                 <div className="grid grid-cols-1 gap-8">
                   <div className="col-span-1">
                     <ParkingMap slots={parkingSlots} />
->
+
                   </div>
                 </div>
               </div>
@@ -858,24 +858,6 @@ export default function App() {
 
           )}
 
-          {/* ══════════ PARKING MAP (TRANG RIÊNG) ══════════ */}
-          {activeTab === 'parking_map' && (
-            <div className="flex flex-col items-center justify-center min-h-[calc(100vh-140px)]">
-              <div className="w-full max-w-4xl">
-                <div className="mb-8 text-center">
-                  <h3 className="text-3xl font-black text-slate-800 mb-2">GIÁM SÁT Ô ĐỖ THỜI GIAN THỰC</h3>
-                  <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">Hệ thống đồng bộ trực tiếp từ cảm biến</p>
-                </div>
-
-                <div className="grid grid-cols-1 gap-8">
-                  <div className="col-span-1">
-                    <ParkingMap slots={parkingSlots} />
-                  </div>
-                </div>
-              </div>
-            </div>
-
-          )}
 
           {/* ══════════ HISTORY ══════════ */}
           {activeTab === 'history' && (

@@ -3,7 +3,7 @@ from psycopg2.extras import RealDictCursor
 
 DB_CONFIG = {
     "host": "localhost",
-    "port": 55432,
+    "port": 54321,
     "dbname": "nhan_dien_bien_so_xe",
     "user": "postgres",
     "password": "postgres",
