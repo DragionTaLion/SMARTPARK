@@ -133,8 +133,8 @@ class AppState:
     def __init__(self):
         # Mặc định 2 cổng
         self.gates = {
-            1: GateState(1, "192.168.137.219"), # Làn Vào
-            2: GateState(2, "192.168.137.212")  # Làn Ra
+            1: GateState(1, "192.168.137.81"), # Làn Vào
+            2: GateState(2, "192.168.137.94")  # Làn Ra
         }
         self.sensor_states = [0, 0, 0, 0, 0] # Trạng thái 5 cảm biến IR
         
@@ -148,7 +148,7 @@ class AppState:
         self.active_connections: List[WebSocket] = []
         self.ser: Optional[serial.Serial] = None
         self.com_port: str = "COM3"
-        self.esp8266_ip: str = "192.168.137.52"
+        self.esp8266_ip: str = "192.168.137.32"
         self.camera_mode: str = "esp32"
         
         # Cooldown per plate
@@ -358,8 +358,12 @@ async def lifespan(app: FastAPI):
 
     # Khởi chạy các luồng xử lý cho từng cổng (V2 Dual-Gate)
     for gate_id in state.gates.keys():
+        # Luôn chạy luồng lấy hình ảnh liên tục từ camera để sẵn sàng khi có trigger
         threading.Thread(target=camera_worker, args=(gate_id,), daemon=True, name=f"CameraWorker-{gate_id}").start()
-        threading.Thread(target=detect_worker, args=(gate_id,), daemon=True, name=f"DetectWorker-{gate_id}").start()
+        
+        # TẮT nhận diện liên tục: Chỉ nhận diện khi có trigger từ cảm biến hồng ngoại (Hardware Trigger)
+        # threading.Thread(target=detect_worker, args=(gate_id,), daemon=True, name=f"DetectWorker-{gate_id}").start()
+        print(f"  [INFO] Đã tắt AI liên tục cho cổng {gate_id} -> Chờ cảm biến hồng ngoại kích hoạt.")
 
     # Luồng giám sát kết nối ESP8266
     threading.Thread(target=esp_monitor_worker, daemon=True, name="ESP-Monitor").start()
