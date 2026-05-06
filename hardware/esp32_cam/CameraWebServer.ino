@@ -9,10 +9,10 @@
 // ===========================
 // Enter your WiFi credentials
 // ===========================
-const char *ssid = "Ho Sy Can";
-const char *password = "phongtro284";
-const char* SERVER_IP   = "192.168.2.34"; // Đúng
-const int   SERVER_PORT = 8000;            // Sửa từ 5000 thành 8000
+const char *ssid = "LAPTOP-71LM2GV2 7594";  // Đồng bộ với ESP8266 chính
+const char *password = "12345678";
+const char* SERVER_IP   = "192.168.137.1"; // IP máy tính qua Mobile Hotspot
+const int   SERVER_PORT = 8000;
 const char* TRIGGER_PATH = "/api/iot/trigger"; 
 
 void startCameraServer();

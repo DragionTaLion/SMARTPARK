@@ -1,27 +1,61 @@
-# --- Dữ liệu AI (Nặng, không nên đẩy lên GitHub) ---
-data/datasets/
-evaluation_results/
+# --- SmartPark Git Exclusion List ---
+
+# AI Models & Runs (Large Files)
 runs/
+**/weights/*.pt
+**/data/models/*.pt
+*.pt
+*.onnx
+*.engine
+
+# Datasets (Images)
+data/datasets/
+**/datasets/
 *.jpg
+*.jpeg
 *.png
 *.mp4
-*.csv
 
-# --- Python & Môi trường ---
-__pycache__/
-*.pyc
-venv/
-.env
-.idea/
-.vscode/
-
-# --- Frontend Dependencies ---
+# Dependencies
 node_modules/
+**/node_modules/
+.venv/
+env/
+venv/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Build & Distribution
 dist/
 build/
-*.log
+*.exe
+*.dll
+*.so
+*.dylib
 
-# --- NGOẠI LỆ (Giữ lại những thứ quan trọng để chạy được) ---
-!data/models/             # Giữ lại các file .pt để người khác tải về là chạy được ngay
-!evaluation_results/confusion_matrix.png  # Giữ lại kết quả để "khoe" độ chính xác 90%
-!.env.example
+# Configuration & Secrets
+.env
+config.json
+*.log
+.vscode/
+.idea/
+
+# Backups & Temp
+backup/
+**/backup/
+*.bak
+*.zip
+*.rar
+*.7z
+tmp/
+temp/
+newupdate/
+testnewcode/
+testnew/
+velorah-command-center.zip
+smart-parking-alpr.zip

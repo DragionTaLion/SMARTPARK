@@ -1,10 +1,45 @@
 [
     {
+
         "bien_so_xe": "38N1-304.33",
         "ten_chu_xe": "Hiếu",
         "so_can_ho": "A1",
         "anh_dang_ky": "",
         "so_dien_thoai": "0839506777",
+
+        "bien_so_xe": "99-E1 222.68",
+        "ten_chu_xe": "Nguyen Van A",
+        "so_can_ho": "E1-201",
+        "anh_dang_ky": "",
+        "so_dien_thoai": "",
+        "da_thanh_toan": false,
+        "phi_thang": 500000
+    },
+    {
+        "bien_so_xe": "30E 777.96",
+        "ten_chu_xe": "Tran Thi B",
+        "so_can_ho": "E7-707",
+        "anh_dang_ky": "",
+        "so_dien_thoai": "",
+        "da_thanh_toan": false,
+        "phi_thang": 500000
+    },
+    {
+        "bien_so_xe": "75-MDD1 000.19",
+        "ten_chu_xe": "Le Van C",
+        "so_can_ho": "D1-101",
+        "anh_dang_ky": "",
+        "so_dien_thoai": "",
+        "da_thanh_toan": false,
+        "phi_thang": 500000
+    },
+    {
+        "bien_so_xe": "A",
+        "ten_chu_xe": "a",
+        "so_can_ho": "qưe",
+        "anh_dang_ky": "",
+        "so_dien_thoai": "qưeqw",
+
         "da_thanh_toan": false,
         "phi_thang": 500000
     }

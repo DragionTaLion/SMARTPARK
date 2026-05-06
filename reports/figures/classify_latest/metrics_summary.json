@@ -1,0 +1,59 @@
+{
+  "task": "classify",
+  "run_dir": "D:\\PBL5\\runs\\classify\\data\\models\\char_model",
+  "figures_dir": "D:\\PBL5\\reports\\figures\\classify_latest",
+  "top_confusions": [
+    {
+      "count": 57,
+      "true": "O",
+      "pred": "0"
+    },
+    {
+      "count": 14,
+      "true": "1",
+      "pred": "I"
+    },
+    {
+      "count": 12,
+      "true": "0",
+      "pred": "O"
+    },
+    {
+      "count": 9,
+      "true": "J",
+      "pred": "I"
+    },
+    {
+      "count": 5,
+      "true": "M",
+      "pred": "H"
+    },
+    {
+      "count": 3,
+      "true": "Y",
+      "pred": "V"
+    },
+    {
+      "count": 3,
+      "true": "R",
+      "pred": "B"
+    },
+    {
+      "count": 3,
+      "true": "Q",
+      "pred": "O"
+    },
+    {
+      "count": 3,
+      "true": "Q",
+      "pred": "2"
+    },
+    {
+      "count": 3,
+      "true": "Q",
+      "pred": "0"
+    }
+  ],
+  "weighted_f1": 0.9656951346394024,
+  "micro_f1": 0.9656862745098039
+}

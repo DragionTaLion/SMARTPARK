@@ -4,12 +4,12 @@
 #include <Servo.h>
 
 // ================= CẤU HÌNH WIFI =================
-const char* ssid = "Ho Sy Can";
-const char* password = "phongtro284";
+const char* ssid = "LAPTOP-71LM2GV2 7594";  // Đồng bộ với ESP8266 chính
+const char* password = "12345678";
 
 // ================= CẤU HÌNH SERVER =================
 // Địa chỉ IP máy tính đã chạy api_server.py
-const char* serverUrl = "http://192.168.50.38:8000/api/trigger?gate=in";
+const char* serverUrl = "http://192.168.137.1:8000/api/trigger?gate=in";
 
 // ================= CẤU HÌNH CHÂN (PINS) =================
 const int trigPin = D1;  // GPIO 5
