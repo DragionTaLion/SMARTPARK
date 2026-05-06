@@ -85,7 +85,7 @@ def check_database():
         try:
             conn = psycopg2.connect(
                 host="localhost",
-                port=55432,
+                port=54321,
                 database="nhan_dien_bien_so_xe",
                 user="postgres",
                 password="postgres"

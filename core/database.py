@@ -3,13 +3,13 @@ Tích hợp Database (PostgreSQL Docker) + Arduino (Serial) cho hệ thống bar
 
 DB (docker-compose.yml):
 - Host: localhost
-- Port: 55432
+- Port: 54321
 - DB: nhan_dien_bien_so_xe
 - User/Pass: postgres/postgres
 
 Schema:
 - cudan(bien_so_xe, ten_chu_xe, so_can_ho, ...)
-- lichsuravao(bien_so_xe, thoi_gian, hinh_anh, trang_thai)
+- lichsuravao(bien_so_xe, thoi_gian, anh_bien_so, trang_thai)
 """
 
 import time
@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
 
 DB_CONFIG = {
     "host": "localhost",
-    "port": 55432,
+    "port": 54321,
     "dbname": "nhan_dien_bien_so_xe",
     "user": "postgres",
     "password": "postgres",
@@ -98,7 +98,7 @@ def insert_history(plate_number: str, trang_thai: str, hinh_anh: Optional[str] =
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO lichsuravao (bien_so_xe, thoi_gian, hinh_anh, trang_thai)
+                INSERT INTO lichsuravao (bien_so_xe, thoi_gian, anh_bien_so, trang_thai)
                 VALUES (%s, %s, %s, %s)
                 """,
                 (plate, time.strftime("%Y-%m-%d %H:%M:%S"), hinh_anh, trang_thai),
