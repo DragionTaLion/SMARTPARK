@@ -560,10 +560,10 @@ def insert_history(plate: str, trang_thai: str, img_base64: Optional[str] = None
                 # Lấy giờ Việt Nam (ICT) ở dạng Naive (để lưu chính xác 14:45 vào DB)
                 vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
                 insert_query = """
-                    INSERT INTO lichsuravao (bien_so_xe, thoi_gian, trang_thai, anh_bien_so)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO lichsuravao (bien_so_xe, thoi_gian, trang_thai, anh_bien_so, gate_id)
+                    VALUES (%s, %s, %s, %s, %s)
                 """
-                params = (normalize_plate(plate), vn_now, trang_thai, img_base64)
+                params = (normalize_plate(plate), vn_now, trang_thai, img_base64, gate_id)
                 
                 cur.execute(insert_query, params)
                 conn.commit()
@@ -1967,8 +1967,6 @@ async def open_manual(gate_id: int):
                 "image": f"data:image/jpeg;base64,{img_base64}" if img_base64 else None
             }), state.main_loop)
             
-    # 2. Phát lệnh mở mạch phần cứng
-    open_gate_http(gate_id)
     return {"success": True, "message": f"Đã quét biển số và mở cổng {gate_id}"}
 
 
@@ -2042,8 +2040,8 @@ async def visitor_pay(body: VisitorPayRequest):
                 )
                 # Ghi lịch sử lượt RA (Vì thu tiền lúc ra)
                 cur.execute(
-                    "INSERT INTO lichsuravao (bien_so_xe, thoi_gian, trang_thai, anh_bien_so) VALUES (%s, %s, 'Ra', '')",
-                    (plate, vn_now)
+                    "INSERT INTO lichsuravao (bien_so_xe, thoi_gian, trang_thai, anh_bien_so, gate_id) VALUES (%s, %s, 'Ra', '', %s)",
+                    (plate, vn_now, body.gate_id)
                 )
                 conn.commit()
 
