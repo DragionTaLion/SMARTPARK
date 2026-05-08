@@ -35,11 +35,12 @@ Servo servoIn;
 Servo servoOut;
 
 // ─── CẤU HÌNH CHÂN ───────────────────────────────────────────
-const int irInPin   = 3;   // RX  – Cảm biến cổng VÀO (rút khi nạp code)
+const int irInPin   = 3;   // RX  – Cảm biến cổng VÀO
 const int irOutPin  = 13;  // D7  – Cảm biến cổng RA
 const int irSlot1   = 0;   // D3  – Ô đỗ 1
 const int irSlot2   = 2;   // D4  – Ô đỗ 2
-const int irSlot3   = 16;  // D0  – Ô đỗ 3`   
+const int irSlot3   = 10;  // SD3 – Ô đỗ 3 (Chuyển từ D0 sang SD3 để lấy D0 cho báo cháy)
+const int firePin   = 16;  // D0  – CẢM BIẾN BÁO CHÁY (Nối nút nhấn hoặc sensor khói)
 const int buzzerPin = 15;  // D8  – Còi
 const int servoInPin  = 12; // D6  – Servo cổng vào
 const int servoOutPin = 14; // D5  – Servo cổng ra
@@ -82,6 +83,7 @@ void setup() {
   pinMode(irSlot1,   INPUT);
   pinMode(irSlot2,   INPUT);
   pinMode(irSlot3,   INPUT);
+  pinMode(firePin,   INPUT_PULLUP); // Chân báo cháy dùng điện trở kéo lên
   pinMode(buzzerPin, OUTPUT);
   digitalWrite(buzzerPin, LOW);
 
@@ -203,6 +205,7 @@ void sendStatusToServer() {
   body += String(s3 == LOW ? 1 : 0);
   body += "],";
   body += "\"gate_trigger\":" + String(trigger) + ",";
+  body += "\"fire_alarm\":" + String(digitalRead(firePin) == LOW ? 1 : 0) + ",";
   body += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
   body += "}";
 
@@ -229,7 +232,14 @@ void sendStatusToServer() {
       // Nếu server ra lệnh mở cổng
       if (openGate > 0 && strcmp(cmd, "open") == 0) {
         Serial.printf("[CMD] Nhan lenh mo cong %d tu server\n", openGate);
-        executeOpenGate(openGate);
+        if (openGate == 3) {
+            // Trường hợp BÁO CHÁY: Mở cả 2 cổng
+            Serial.println("!!! EMERGENCY: OPENING ALL GATES !!!");
+            executeOpenGate(1);
+            executeOpenGate(2);
+        } else {
+            executeOpenGate(openGate);
+        }
       }
     } else {
       Serial.printf("[SERVER] Parse JSON loi: %s\n", err.c_str());

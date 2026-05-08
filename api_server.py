@@ -31,6 +31,8 @@ import cv2
 import numpy as np
 import psycopg2
 import psycopg2.extras
+from psycopg2 import pool
+import contextlib
 from fastapi import (
     FastAPI, WebSocket, WebSocketDisconnect,
     HTTPException, UploadFile, File, Form
@@ -66,6 +68,14 @@ DB_CONFIG = {
     "user": "postgres",
     "password": "postgres",
 }
+
+# Khởi tạo Connection Pool
+try:
+    db_pool = pool.ThreadedConnectionPool(minconn=1, maxconn=20, **DB_CONFIG)
+    print("[DB] Khởi tạo Connection Pool thành công (max: 20)")
+except Exception as e:
+    print(f"[FATAL] Không thể khởi tạo database pool: {e}")
+    sys.exit(1)
 
 RESIDENTS_SYNC_FILE = os.path.join("data", "residents_sync.json")
 
@@ -470,8 +480,35 @@ def esp_monitor_worker():
             print(f"[ESP-MONITOR] {ip_display} – ❌ Offline (last seen {elapsed:.0f}s ago)")
 
 # ─── Helpers DB ────────────────────────────────────────────────────────────
+def get_conn_raw(max_retries=3):
+    """Lấy connection thô từ pool, tự động thử lại nếu lỗi."""
+    for attempt in range(max_retries):
+        try:
+            conn = db_pool.getconn()
+            conn.cursor_factory = psycopg2.extras.RealDictCursor
+            return conn
+        except psycopg2.OperationalError as e:
+            print(f"[DB] Lỗi kết nối (lần {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                raise
+    return None
+
+@contextlib.contextmanager
 def get_conn():
-    return psycopg2.connect(**DB_CONFIG, cursor_factory=psycopg2.extras.RealDictCursor)
+    """Context manager tự động trả connection về pool."""
+    conn = get_conn_raw()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
 def normalize_plate(raw: str) -> str:
@@ -978,16 +1015,15 @@ def detect_worker(gate_id: int):
                     # CỔNG VÀO: cư dân → Vao, khách → Vao
                     trang_thai = "Vao"
                     
-                    # QUOTA CHECK (Chỉ check khi vào)
-                    total_in_lot = get_resident_in_lot_count() + get_visitor_in_lot_count()
+                    # QUOTA CHECK (Chặt chẽ: Cư dân 2 chỗ, Khách 1 chỗ)
                     if is_resident:
-                        if total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
+                        if get_resident_in_lot_count() >= RESIDENT_CAPACITY:
                             trang_thai = "Tu choi"
-                            print(f"[QUOTA] ❌ Cư dân {plate_text} bị chặn: bãi đã đầy 100%")
+                            print(f"[QUOTA] ❌ Cư dân {plate_text} bị chặn: hết chỗ cư dân ({RESIDENT_CAPACITY}/{RESIDENT_CAPACITY})")
                     else:
-                        if get_visitor_in_lot_count() >= VISITOR_CAPACITY or total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
+                        if get_visitor_in_lot_count() >= VISITOR_CAPACITY:
                             trang_thai = "Tu choi"
-                            print(f"[QUOTA] ❌ Vãng lai {plate_text} bị chặn: hết chỗ vãng lai hoặc bãi đầy")
+                            print(f"[QUOTA] ❌ Vãng lai {plate_text} bị chặn: hết chỗ vãng lai ({VISITOR_CAPACITY}/{VISITOR_CAPACITY})")
                             
                 elif gate_id == 2:
                     # CỔNG RA: cư dân → Ra, khách trong bãi → Tu choi
@@ -1118,19 +1154,19 @@ async def hardware_trigger(gate: str = "in"):
     trang_thai = "Vao" if gate == "in" else "Ra"
 
     if gate == "in":
-        total_in_lot = get_resident_in_lot_count() + get_visitor_in_lot_count()
         if is_resident:
-            if total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
-                print(f"[QUOTA] ❌ Cư dân {plate} bị chặn: bãi đã đầy 100%")
+            current_res = get_resident_in_lot_count()
+            if current_res >= RESIDENT_CAPACITY:
+                print(f"[QUOTA] ❌ Cư dân {plate} bị chặn: hết chỗ dành cho cư dân ({current_res}/{RESIDENT_CAPACITY})")
                 action = "deny"
-                reason = "Bãi đã đầy"
+                reason = "Hết chỗ cư dân"
                 trang_thai = "Tu choi"
             else:
                 print(f"[QUOTA] ✅ Cư dân {plate} được vào.")
         else:
-            visitor_count = get_visitor_in_lot_count()
-            if visitor_count >= VISITOR_CAPACITY or total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
-                print(f"[QUOTA] ❌ Xe lạ {plate} bị chặn: hết chỗ vãng lai hoặc bãi đầy")
+            current_vis = get_visitor_in_lot_count()
+            if current_vis >= VISITOR_CAPACITY:
+                print(f"[QUOTA] ❌ Xe lạ {plate} bị chặn: hết chỗ dành cho khách ({current_vis}/{VISITOR_CAPACITY})")
                 action = "deny"
                 reason = "Hết chỗ vãng lai"
                 trang_thai = "Tu choi"
@@ -1633,6 +1669,7 @@ async def set_camera_source(body: ConfigSource):
 class HardwareStatus(BaseModel):
     sensors: List[int]    # [S1, S2, S3, S4, S5] – 0: Trống, 1: Có xe
     gate_trigger: int = 0 # 0: Không, 1: Cổng Vào, 2: Cổng Ra
+    fire_alarm: int = 0   # 1: Đang báo cháy
     ip: Optional[str] = None  # ESP tự báo IP của nó (tuỳ chọn)
 
 @app.post("/api/hardware/status", tags=["Hardware"])
@@ -1655,8 +1692,19 @@ async def update_hardware_status(body: HardwareStatus):
     esp_state.sensor_data = {
         "sensors": body.sensors,
         "gate_trigger": body.gate_trigger,
+        "fire_alarm": body.fire_alarm,
         "timestamp": time.strftime("%H:%M:%S")
     }
+
+    # Xử lý BÁO CHÁY KHẨN CẤP
+    if body.fire_alarm == 1:
+        print(" [!!!] BÁO CHÁY - MỞ TOÀN BỘ CỔNG!!!")
+        asyncio.create_task(broadcast_detection({
+            "type": "emergency",
+            "message": "🔥 CẢNH BÁO CHÁY! MỞ TẤT CẢ CỔNG!",
+            "timestamp": time.strftime("%H:%M:%S")
+        }))
+        return {"status": "emergency", "open_gate": 3, "cmd": "open"} # 3 = cả 2 cổng
 
     response = {"status": "ok", "open_gate": 0, "cmd": "none"}
 
@@ -1880,25 +1928,38 @@ async def open_manual(gate_id: int):
         raise HTTPException(status_code=400, detail="Gate ID không hợp lệ")
     print(f"[LOG] Bảo vệ nhấn nút mở cổng {gate_id} thủ công")
 
-    # Kiểm tra quota trước khi mở cổng bằng tay
-    total_in_lot = get_resident_in_lot_count() + get_visitor_in_lot_count()
-    if gate_id == 1 and total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
-        return {"success": False, "message": "Bãi đã đầy, không thể mở cổng"}
+
 
     gate = state.gates.get(gate_id)
     trang_thai = "Vao" if gate_id == 1 else "Ra"
     
-    # 1. Thử quét biển số ngay lúc bấm nút để lưu lịch sử
+    # 1. Thử quét biển số ngay lúc bấm nút để xác định loại xe và lưu lịch sử
+    plate = "[THỦ CÔNG]"
+    img_base64 = ""
+    is_resident = False
+    
     if gate and gate.latest_frame is not None:
         frame = gate.latest_frame.copy()
         res = process_frame_core(frame)
         plate = res.get("plate") or "[THỦ CÔNG]"
         img_base64 = res.get("plate_crop_base64") or ""
-        
-        insert_history(plate, trang_thai, img_base64, gate_id=gate_id)
-        
-        # Đồng bộ Dashboard
-        if state.main_loop and state.main_loop.is_running():
+        is_resident = res.get("is_resident", False)
+
+    # 2. Kiểm tra quota CHẶT CHẼ trước khi mở cổng (chỉ check khi VÀO)
+    if gate_id == 1:
+        if is_resident:
+            if get_resident_in_lot_count() >= RESIDENT_CAPACITY:
+                return {"success": False, "message": f"Hết chỗ cư dân ({RESIDENT_CAPACITY}/{RESIDENT_CAPACITY})"}
+        else:
+            if get_visitor_in_lot_count() >= VISITOR_CAPACITY:
+                return {"success": False, "message": f"Hết chỗ vãng lai ({VISITOR_CAPACITY}/{VISITOR_CAPACITY})"}
+
+    # 3. Ghi lịch sử và mở cổng
+    insert_history(plate, trang_thai, img_base64, gate_id=gate_id)
+    open_gate_http(gate_id)
+    
+    # Đồng bộ Dashboard
+    if state.main_loop and state.main_loop.is_running():
             asyncio.run_coroutine_threadsafe(broadcast_detection({
                 **res, 
                 "gate_id": gate_id,
@@ -1917,7 +1978,14 @@ async def calculate_visitor_fee(plate: str):
     """Tính toán thời gian đỗ và số tiền cho xe vãng lai"""
     entry_time = get_visitor_last_entry(plate)
     if not entry_time:
-        return {"plate": plate, "duration_minutes": 0, "fee": 0, "entry_time": None}
+        print(f"[FEE] Xe {plate} ra nhưng không tìm thấy dữ liệu vào -> Thu phí mặc định {VISITOR_FLAT_FEE}")
+        return {
+            "plate": plate, 
+            "duration_minutes": 0, 
+            "fee": VISITOR_FLAT_FEE, 
+            "entry_time": "Không xác định",
+            "warning": "Không tìm thấy lượt vào"
+        }
     
     # Sử dụng giờ Việt Nam (Naive)
     vn_now = datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
@@ -1933,8 +2001,12 @@ async def calculate_visitor_fee(plate: str):
     duration = vn_now - entry_time
     duration_minutes = int(duration.total_seconds() / 60)
     
-    # Chuyển sang thu phí lượt: 20k/lượt cố định
-    fee = VISITOR_FLAT_FEE
+    # Logic tính phí: Miễn phí nếu dưới FREE_MINUTES, ngược lại thu phí cố định
+    if duration_minutes <= FREE_MINUTES:
+        fee = 0
+        print(f"[FEE] Xe {plate} ra sớm ({duration_minutes} phút) -> Miễn phí")
+    else:
+        fee = VISITOR_FLAT_FEE
         
     return {
         "plate": plate,
