@@ -82,6 +82,10 @@ def run_migrations():
                 updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Đảm bảo cột slot_name tồn tại nếu bảng đã có từ bản cũ
+        cur.execute("""
+            ALTER TABLE parking_slots ADD COLUMN IF NOT EXISTS slot_name VARCHAR(50) DEFAULT 'Ô đỗ'
+        """)
         for i in range(1, 4):
             cur.execute("""
                 INSERT INTO parking_slots (slot_id, slot_name, status)
