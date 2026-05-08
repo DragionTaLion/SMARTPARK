@@ -44,6 +44,8 @@ type DetectionResult = {
   entry_image?: string; // Ảnh lúc vào để so sánh
   gate_id?: number;
   gate_name?: string;
+  frame_width?: number;
+  frame_height?: number;
 };
 
 type ParkingSlot = {
@@ -241,8 +243,8 @@ export default function App() {
           }
         }
 
-        // 1. Nhận diện biển số
-        if (msg.processed && msg.gate_id) {
+        // 1. Nhận diện biển số (Luôn cập nhật nếu có bbox hoặc đã xử lý xong)
+        if ((msg.type === 'detection' || msg.processed) && msg.gate_id) {
           setLastDetections(prev => ({ ...prev, [msg.gate_id]: msg }));
           setLatestDetection(msg);
           loadLogs();
@@ -501,6 +503,19 @@ export default function App() {
     } catch (e) {
       console.error("Toggle payment failed:", e);
     }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setNewResident(prev => ({
+        ...prev,
+        anh_dang_ky: (reader.result as string).split(',')[1] // Lấy phần Base64
+      }));
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleScanResidentPlate = async () => {
@@ -788,7 +803,24 @@ export default function App() {
                       <button onClick={() => handleManualOpen(1)} className="bg-emerald-50 text-emerald-600 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase hover:bg-emerald-100 transition-all border border-emerald-100">Bấm Mở</button>
                     </div>
                     <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-inner border-2 border-slate-50">
-                      <img src={`http://localhost:8000/api/video_feed?gate_id=1`} className="w-full h-full object-cover" alt="Gate 1" />
+                      <img src={`/api/video_feed?gate_id=1`} className="w-full h-full object-cover" alt="Gate 1" />
+                      {latestDetection?.gate_id === 1 && (
+                        <BBoxOverlay detection={latestDetection} isIPCam={true} videoRef={{ current: null } as any} />
+                      )}
+                      {/* Status Overlay */}
+                      {lastDetections[1] && (
+                        <div className="absolute bottom-4 left-4 right-4 glass-card bg-white/90 p-3 rounded-2xl border border-white/50 shadow-xl backdrop-blur-md flex items-center justify-between">
+                          <div className="flex flex-col">
+                            <span className="text-[10px] font-black text-slate-400 uppercase leading-none mb-1">Cổng Vào</span>
+                            <span className="text-sm font-black text-slate-800">{lastDetections[1].plate}</span>
+                          </div>
+                          <div className="text-right">
+                            <span className={`text-[9px] font-black uppercase px-2 py-1 rounded-lg ${lastDetections[1].is_resident ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600'}`}>
+                              {lastDetections[1].owner || 'Vãng lai'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                   </div>
@@ -803,7 +835,24 @@ export default function App() {
                       <button onClick={() => handleManualOpen(2)} className="bg-orange-50 text-orange-600 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase hover:bg-orange-100 transition-all border border-orange-100">Bấm Mở</button>
                     </div>
                     <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-inner border-2 border-slate-50">
-                      <img src={`http://localhost:8000/api/video_feed?gate_id=2`} className="w-full h-full object-cover" alt="Gate 2" />
+                      <img src={`/api/video_feed?gate_id=2`} className="w-full h-full object-cover" alt="Gate 2" />
+                      {latestDetection?.gate_id === 2 && (
+                        <BBoxOverlay detection={latestDetection} isIPCam={true} videoRef={{ current: null } as any} />
+                      )}
+                      {/* Status Overlay */}
+                      {lastDetections[2] && (
+                        <div className="absolute bottom-4 left-4 right-4 glass-card bg-white/90 p-3 rounded-2xl border border-white/50 shadow-xl backdrop-blur-md flex items-center justify-between">
+                          <div className="flex flex-col">
+                            <span className="text-[10px] font-black text-orange-400 uppercase leading-none mb-1">Cổng Ra</span>
+                            <span className="text-sm font-black text-slate-800">{lastDetections[2].plate}</span>
+                          </div>
+                          <div className="text-right">
+                            <span className={`text-[9px] font-black uppercase px-2 py-1 rounded-lg ${lastDetections[2].is_resident ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600'}`}>
+                              {lastDetections[2].owner || 'Vãng lai'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1012,6 +1061,37 @@ export default function App() {
                         />
                       </div>
                     </div>
+
+                    {/* Photo Upload & Preview Section */}
+                    <div className="mb-4 bg-slate-50 p-4 rounded-2xl border border-dashed border-slate-300">
+                      <div className="flex items-center gap-4">
+                        <div className="w-24 h-16 bg-slate-200 rounded-xl overflow-hidden flex items-center justify-center relative border border-white shadow-sm">
+                          {newResident.anh_dang_ky ? (
+                            <img src={`data:image/jpeg;base64,${newResident.anh_dang_ky}`} className="w-full h-full object-cover" alt="Preview" />
+                          ) : (
+                            <Camera size={20} className="text-slate-400" />
+                          )}
+                        </div>
+                        <div className="flex-1">
+                          <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-2">Ảnh biển số đăng ký</label>
+                          <div className="flex gap-2">
+                            <label className="cursor-pointer bg-white border border-slate-200 px-3 py-1.5 rounded-lg text-[10px] font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm">
+                              Chọn ảnh...
+                              <input type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
+                            </label>
+                            {newResident.anh_dang_ky && (
+                              <button
+                                onClick={() => setNewResident(prev => ({ ...prev, anh_dang_ky: '' }))}
+                                className="bg-red-50 text-red-500 px-3 py-1.5 rounded-lg text-[10px] font-bold hover:bg-red-100 transition-all"
+                              >
+                                Xóa
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
                     {addError && <p className="text-red-600 text-[11px] mb-3 font-bold">{addError}</p>}
                     <div className="flex gap-2">
                       <button
@@ -1764,8 +1844,8 @@ function BBoxOverlay({ detection, videoRef, isIPCam = false }: {
   isIPCam?: boolean;
 }) {
   if (!detection.bbox) return null;
-  const vw = isIPCam ? 640 : (videoRef.current?.videoWidth || 1280);
-  const vh = isIPCam ? 480 : (videoRef.current?.videoHeight || 720);
+  const vw = detection.frame_width || (isIPCam ? 640 : (videoRef.current?.videoWidth || 1280));
+  const vh = detection.frame_height || (isIPCam ? 480 : (videoRef.current?.videoHeight || 720));
   const [x1, y1, x2, y2] = detection.bbox;
   const left = `${(x1 / vw * 100).toFixed(2)}%`;
   const top = `${(y1 / vh * 100).toFixed(2)}%`;

@@ -9,10 +9,10 @@ def scan(ip, port):
             return (ip, port)
     return None
 
-ips = [f"172.20.10.{i}" for i in range(1, 51)]
+ips = [f"192.168.137.{i}" for i in range(1, 255)]
 ports = [80, 81]
 
-print("Scanning 172.20.10.1-50 on ports 80, 81...")
+print("Scanning 192.168.137.1-254 on ports 80, 81...")
 with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
     futures = [executor.submit(scan, ip, port) for ip in ips for port in ports]
     results = [f.result() for f in futures if f.result()]

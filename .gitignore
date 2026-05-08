@@ -1,61 +1,8 @@
-# --- SmartPark Git Exclusion List ---
-
-# AI Models & Runs (Large Files)
-runs/
-**/weights/*.pt
-**/data/models/*.pt
-*.pt
-*.onnx
-*.engine
-
-# Datasets (Images)
-data/datasets/
-**/datasets/
-*.jpg
-*.jpeg
-*.png
-*.mp4
-
-# Dependencies
 node_modules/
-**/node_modules/
-.venv/
-env/
-venv/
-ENV/
-
-# Python Cache
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-
-# Build & Distribution
-dist/
 build/
-*.exe
-*.dll
-*.so
-*.dylib
-
-# Configuration & Secrets
-.env
-config.json
+dist/
+coverage/
+.DS_Store
 *.log
-.vscode/
-.idea/
-
-# Backups & Temp
-backup/
-**/backup/
-*.bak
-*.zip
-*.rar
-*.7z
-tmp/
-temp/
-newupdate/
-testnewcode/
-testnew/
-velorah-command-center.zip
-smart-parking-alpr.zip
+.env*
+!.env.example

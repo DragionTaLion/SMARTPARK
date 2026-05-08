@@ -14,11 +14,11 @@
  */
 
 // ================= CẤU HÌNH WIFI =================
-const char* ssid = "LAPTOP-71LM2GV2 7594";  // Đồng bộ với ESP8266 chính
+const char* ssid = "LAPTOP-71LM2GV2 7594";
 const char* password = "12345678";
 
 // ================= CẤU HÌNH SERVER =================
-const char* serverIp = "192.168.137.1"; // IP máy tính qua Mobile Hotspot 
+const char* serverIp = "192.168.137.1"; 
 const int serverPort = 8000;
 String triggerUrl = "/api/trigger";
 String statusUrl = "/api/hardware/status";

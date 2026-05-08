@@ -1,7 +1,5 @@
 {
-  "name": "Smart Parking ALPR",
-  "description": "Hệ thống quản lý xe ra vào chung cư sử dụng AI nhận diện biển số.",
-  "requestFramePermissions": [
-    "camera"
-  ]
+  "name": "Velorah Command Center",
+  "description": "High-performance SaaS Command Center platform with live video tracking and analytics.",
+  "requestFramePermissions": []
 }

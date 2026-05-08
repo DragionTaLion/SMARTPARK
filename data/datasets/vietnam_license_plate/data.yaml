@@ -1,0 +1,13 @@
+names:
+- plate
+nc: 1
+roboflow:
+  license: CC BY 4.0
+  project: vietnam-license-plate-h8t3n-lkodj
+  url: https://universe.roboflow.com/vietnam-license-plate-sb0bc/vietnam-license-plate-h8t3n-lkodj/dataset/1
+  version: 1
+  workspace: vietnam-license-plate-sb0bc
+path: D:\PBL5\data\datasets\vietnam_license_plate
+test: test/images
+train: train/images
+val: valid/images
