@@ -506,9 +506,9 @@ def get_all_residents_for_fuzzy() -> list:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT bien_so_xe, ten_chu_xe, so_can_ho FROM cudan")
+                cur.execute("SELECT bien_so_xe, ten_chu_xe, so_can_ho, da_thanh_toan FROM cudan")
                 rows = cur.fetchall()
-                return [(normalize_plate(r["bien_so_xe"]), r["bien_so_xe"], r["ten_chu_xe"]) for r in rows]
+                return [(normalize_plate(r["bien_so_xe"]), r["bien_so_xe"], r["ten_chu_xe"], r["da_thanh_toan"]) for r in rows]
     except Exception as e:
         print(f"[DB] get_all_residents error: {e}")
         return []
@@ -771,13 +771,18 @@ def process_frame_core(frame: np.ndarray) -> dict:
         residents = get_all_residents_for_fuzzy()
         norm_det = normalize_plate(plate_text)
         best_ratio = 0
-        for norm_r, orig_r, owner_name in residents:
+        for norm_r, orig_r, owner_name, da_thanh_toan in residents:
             ratio = difflib.SequenceMatcher(None, norm_det, norm_r).ratio()
             if ratio > 0.82 and ratio > best_ratio:
                 best_ratio = ratio
-                resident = {"ten_chu_xe": owner_name, "bien_so_xe": orig_r}
+                resident = {"ten_chu_xe": owner_name, "bien_so_xe": orig_r, "da_thanh_toan": da_thanh_toan}
                 matched_plate = orig_r
                 is_fuzzy = True
+
+    # Cư dân chưa đóng phí -> coi như vãng lai (Từ chối mở tự động)
+    if resident and not resident.get("da_thanh_toan", False):
+        print(f"[FEE] ❌ Cư dân {plate_text} chưa đóng phí tháng → từ chối")
+        resident = None
 
     if resident:
         owner = resident["ten_chu_xe"]
@@ -951,23 +956,41 @@ def detect_worker(gate_id: int):
             # Fuzzy matching
             if not resident:
                 all_res = get_all_residents_for_fuzzy()
-                for norm, original, owner in all_res:
+                for norm, original, owner, da_thanh_toan in all_res:
                     ratio = difflib.SequenceMatcher(None, normalize_plate(plate_text), norm).ratio()
                     if ratio > 0.8:
-                        resident = {"bien_so_xe": original, "ten_chu_xe": owner}
+                        resident = {"bien_so_xe": original, "ten_chu_xe": owner, "da_thanh_toan": da_thanh_toan}
                         plate_text = original
                         break
 
             # 5. Xử lý logic Mở Cổng & Ghi nhật ký
-            if plate_text != gate.last_processed_plate or (now - gate.last_process_time > 10):
+            if plate_text != gate.last_processed_plate or (now - gate.last_process_time > 30):
                 is_resident = resident is not None
+                
+                # Cư dân chưa đóng phí -> không mở cổng
+                if is_resident and resident:
+                    if not resident.get("da_thanh_toan", False):
+                        is_resident = False
+                        print(f"[FEE] ❌ Cư dân {plate_text} chưa đóng phí tháng → từ chối")
                 
                 # ── Xác định trạng thái dựa trên gate và loại xe ──
                 if gate_id == 1:
-                    # CỔNG VÀO: cư dân → Vao, khách → Vao (ghi nhận thời điểm vào để tính tiền lúc ra)
-                    trang_thai = "Vao" if is_resident else "Vao" 
+                    # CỔNG VÀO: cư dân → Vao, khách → Vao
+                    trang_thai = "Vao"
+                    
+                    # QUOTA CHECK (Chỉ check khi vào)
+                    total_in_lot = get_resident_in_lot_count() + get_visitor_in_lot_count()
+                    if is_resident:
+                        if total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
+                            trang_thai = "Tu choi"
+                            print(f"[QUOTA] ❌ Cư dân {plate_text} bị chặn: bãi đã đầy 100%")
+                    else:
+                        if get_visitor_in_lot_count() >= VISITOR_CAPACITY or total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
+                            trang_thai = "Tu choi"
+                            print(f"[QUOTA] ❌ Vãng lai {plate_text} bị chặn: hết chỗ vãng lai hoặc bãi đầy")
+                            
                 elif gate_id == 2:
-                    # CỔNG RA: cư dân → Ra, khách trong bãi → Tu choi (yêu cầu thu phí trước khi cho ra)
+                    # CỔNG RA: cư dân → Ra, khách trong bãi → Tu choi
                     if is_resident:
                         trang_thai = "Ra"
                     elif is_visitor_in_lot(plate_text):
@@ -984,19 +1007,11 @@ def detect_worker(gate_id: int):
                 _, buffer = cv2.imencode('.jpg', crop)
                 img_base64 = base64.b64encode(buffer).decode('utf-8')
 
-                # Ghi log vào DB (cư dân vào/ra, khách ra, hoặc từ chối)
-                # Khách vào KHÔNG ghi ở đây — ghi khi bảo vệ xác nhận qua /api/visitor/pay
-                if not (gate_id == 1 and not is_resident):
-                    insert_history(plate_text, trang_thai, img_base64, gate_id=gate_id)
+                # Ghi log vào DB (ghi 1 lần duy nhất cho cả khách và cư dân)
+                insert_history(plate_text, trang_thai, img_base64, gate_id=gate_id)
 
                 # Broadcast tới Web
-                is_visitor_alert = (not is_resident and ((gate_id == 1) or (gate_id == 2 and is_visitor_in_lot(plate_text))))
-                
-                # Logic: Cổng 1 vãng lai -> Vào ngay (ghi log), Cổng 2 vãng lai -> Alert
-                if gate_id == 1 and not is_resident:
-                    insert_history(plate_text, "Vao", img_base64, gate_id=gate_id)
-                    trang_thai = "Vao"
-                    is_visitor_alert = False # Không cần alert ở cổng vào nữa vì thu tiền ở cổng ra
+                is_visitor_alert = (not is_resident and gate_id == 2 and is_visitor_in_lot(plate_text))
 
                 # Lấy ảnh lúc vào để đối chiếu nếu là cổng ra và là xe khách
                 entry_image_base64 = None
@@ -1097,40 +1112,48 @@ async def hardware_trigger(gate: str = "in"):
     plate = result.get("plate")
     is_resident = result.get("is_resident", False)
 
-    # ── Bước 2: Kiểm tra quota khi xe VÀO ──
+    # ── Bước 2 & 3: Kiểm tra quota và quyết định ──
+    action = "open"
+    reason = ""
+    trang_thai = "Vao" if gate == "in" else "Ra"
+
     if gate == "in":
+        total_in_lot = get_resident_in_lot_count() + get_visitor_in_lot_count()
         if is_resident:
-            # Cư dân: kiểm tra quota cư dân
-            resident_count = get_resident_in_lot_count()
-            if resident_count >= RESIDENT_CAPACITY:
-                print(f"[QUOTA] ❌ Cư dân {plate} bị chặn: {resident_count}/{RESIDENT_CAPACITY} chỗ cư dân đã đầy")
-                return {"action": "deny", "reason": f"Hết chỗ cư dân ({resident_count}/{RESIDENT_CAPACITY})"}
-            print(f"[QUOTA] ✅ Cư dân {plate} được vào: {resident_count}/{RESIDENT_CAPACITY}")
+            if total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
+                print(f"[QUOTA] ❌ Cư dân {plate} bị chặn: bãi đã đầy 100%")
+                action = "deny"
+                reason = "Bãi đã đầy"
+                trang_thai = "Tu choi"
+            else:
+                print(f"[QUOTA] ✅ Cư dân {plate} được vào.")
         else:
-            # Vãng lai: kiểm tra quota vãng lai
             visitor_count = get_visitor_in_lot_count()
-            if visitor_count >= VISITOR_CAPACITY:
-                print(f"[QUOTA] ❌ Xe lạ {plate} bị chặn: {visitor_count}/{VISITOR_CAPACITY} chỗ vãng lai đã đầy")
-                return {"action": "deny", "reason": f"Hết chỗ vãng lai ({visitor_count}/{VISITOR_CAPACITY})"}
-            print(f"[QUOTA] ✅ Xe lạ {plate} được vào: {visitor_count}/{VISITOR_CAPACITY}")
+            if visitor_count >= VISITOR_CAPACITY or total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
+                print(f"[QUOTA] ❌ Xe lạ {plate} bị chặn: hết chỗ vãng lai hoặc bãi đầy")
+                action = "deny"
+                reason = "Hết chỗ vãng lai"
+                trang_thai = "Tu choi"
+            else:
+                print(f"[QUOTA] ✅ Xe lạ {plate} được vào.")
+    else:
+        # Cổng ra
+        if not is_resident:
+            # Vãng lai ra phải quét tay để thu tiền
+            action = "deny"
+            trang_thai = "Tu choi"
+            reason = "Vui lòng thanh toán"
 
-    # ── Bước 3: Quyết định mở/đóng cổng ──
-    action = "open" if is_resident or gate == "in" else "deny"
-
-    # 💡 LƯU Ý QUAN TRỌNG: 
-    # ESP8266 sẽ tự mở cổng nếu nhận được {"action":"open"} trong response của POST này.
-    # Do đó chúng ta KHÔNG gọi open_gate_http(gate_id) ở đây để tránh gửi 2 lệnh trùng lặp.
-    
     # Đồng bộ UI
     result["gate_id"] = gate_id
     result["visitor_alert"] = (not is_resident and gate == "out")
+    result["trang_thai"] = trang_thai
     await broadcast_detection(result)
     
     # Ghi log
-    trang_thai = "Vao" if gate == "in" else "Ra"
     insert_history(plate, trang_thai, result.get("plate_crop_base64", ""), gate_id=gate_id)
 
-    return {"action": action, "plate": plate, "owner": result.get("owner")}
+    return {"action": action, "plate": plate, "owner": result.get("owner"), "reason": reason}
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 
@@ -1413,6 +1436,13 @@ async def toggle_payment(resident_id: int):
                 # Đồng bộ cư dân sau khi đổi trạng thái thanh toán
                 export_residents_to_json()
                 
+                # Xóa cooldown của AI nếu xe đang đứng đợi ở cổng để AI quét lại ngay lập tức
+                norm_plate = normalize_plate(plate)
+                for gate in state.gates.values():
+                    if normalize_plate(gate.last_processed_plate) == norm_plate:
+                        gate.last_process_time = 0
+                        gate.last_processed_plate = ""
+                
                 return {"success": True, "da_thanh_toan": new_status}
     except Exception as e:
         traceback.print_exc()
@@ -1456,7 +1486,7 @@ async def scan_registration():
     
     frame = gate.latest_frame.copy()
     # Chạy xử lý AI (không lưu log ra bảng lịch sử ở giai đoạn đăng ký)
-    res = process_frame_core(frame, demo_mode=True)
+    res = process_frame_core(frame)
     
     return {
         "plate": res.get("plate", ""),
@@ -1849,6 +1879,11 @@ async def open_manual(gate_id: int):
     if gate_id not in [1, 2]:
         raise HTTPException(status_code=400, detail="Gate ID không hợp lệ")
     print(f"[LOG] Bảo vệ nhấn nút mở cổng {gate_id} thủ công")
+
+    # Kiểm tra quota trước khi mở cổng bằng tay
+    total_in_lot = get_resident_in_lot_count() + get_visitor_in_lot_count()
+    if gate_id == 1 and total_in_lot >= (RESIDENT_CAPACITY + VISITOR_CAPACITY):
+        return {"success": False, "message": "Bãi đã đầy, không thể mở cổng"}
 
     gate = state.gates.get(gate_id)
     trang_thai = "Vao" if gate_id == 1 else "Ra"
