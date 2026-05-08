@@ -289,8 +289,16 @@ void executeOpenGate(int gateId) {
 
     // Mở barrier: góc 90° (điều chỉnh theo servo thực tế)
     servoIn.write(90);
-    delay(GATE_OPEN_MS);
-    servoIn.write(0); // Đóng lại
+    delay(GATE_OPEN_MS); // Mở sẵn 3 giây đầu tiên
+    
+    // Chờ xe hiện tại đi qua hẳn cảm biến (LOW = đang bị che)
+    while (digitalRead(irInPin) == LOW) {
+      delay(200);
+    }
+    
+    // Xe 1 vừa qua khỏi cảm biến -> Chờ thêm 2 giây cho lọt cái đuôi xe rồi ĐÓNG NGAY LẬP TỨC để chặn xe 2
+    delay(2000);
+    servoIn.write(0); // Sập cổng chặn xe 2 lại
 
   } else if (gateId == 2) {
     // ─── Cổng RA ─────────────────────────────────────────────
@@ -299,7 +307,15 @@ void executeOpenGate(int gateId) {
     beep(1);
 
     servoOut.write(90);
-    delay(GATE_OPEN_MS);
+    delay(GATE_OPEN_MS); // Mở sẵn tối thiểu 3s
+    
+    // Chờ xe hiện tại đi qua hẳn cảm biến
+    while (digitalRead(irOutPin) == LOW) {
+      delay(200);
+    }
+    
+    // Đóng ngay sau 2 giây để chặn xe bám đuôi
+    delay(2000);
     servoOut.write(0);
   }
 

@@ -1,0 +1,92 @@
+# 🏛 Kiến trúc Kỹ thuật Hệ thống SmartPark V2.1
+
+Tài liệu này mô tả chi tiết toàn bộ 스택 (Stack) công nghệ, luồng xử lý và kiến trúc phần mềm/phần cứng của dự án SmartPark.
+
+---
+
+## 1. Frontend (Giao diện Web Cổng bảo vệ)
+**Công nghệ sử dụng:**
+- **Core:** React 18, TypeScript, Vite (Build tool).
+- **Styling:** Tailwind CSS (thiết kế UI nhanh, responsive), Lucide React (Icons).
+- **Animations:** Framer Motion (hiệu ứng slide-down banner, mượt mà UI).
+- **Giao tiếp mạng:**
+  - `fetch` API cho các RESTful request.
+  - **WebSocket (`ws://`)** để nhận tín hiệu thời gian thực (Real-time) từ Backend.
+
+**Kiến trúc luồng xử lý FE:**
+- **Single Page Application (SPA):** Toàn bộ các trang (Dashboard, Cư dân, Doanh thu, Lịch sử) được thiết kế trên 1 trang duy nhất, chuyển tab không tải lại trang.
+- **WebSocket Event-Driven:** FE duy trì 1 socket mở với BE. Khi có sự kiện (cảm biến thay đổi, AI quét xong biển số, xe lạ cần thu phí), BE bắn socket, FE tự động cập nhật State (React hooks) để render lại màn hình lập tức.
+- **Camera Streaming:** Nhúng trực tiếp ảnh dưới dạng luồng MJPEG (Motion JPEG) từ API Backend qua thẻ `<img>`.
+
+---
+
+## 2. Backend (Lõi xử lý AI & Nghiệp vụ)
+**Công nghệ sử dụng:**
+- **Core:** Python 3.10+, FastAPI (Web framework hiệu năng cao, hỗ trợ Async).
+- **Máy chủ Web (ASGI):** Uvicorn.
+- **Xử lý Ảnh & AI:**
+  - `OpenCV` (`cv2`): Xử lý khung hình, cắt ảnh (crop), chuyển đổi ma trận màu.
+  - `Ultralytics YOLOv8`: 
+    - 1 Model YOLO để phát hiện và khoanh vùng biển số xe (`yolo26n.pt`).
+    - 1 Model YOLO (Char model) / Logic OCR tùy chỉnh để tách và đọc các ký tự trên biển số.
+- **Xử lý Luồng (Concurrency):** Sử dụng `async/await` kết hợp với Background Tasks của FastAPI để không block luồng Web khi AI đang chạy (Heavy CPU bound).
+
+**Nhiệm vụ chính:**
+- Phân luồng REST API cho Web và Hardware.
+- Điều phối Camera: Gộp luồng từ ESP32-CAM và Webcam máy tính.
+- Thực thi **Core AI Loop**: Lấy ảnh $\rightarrow$ Cắt biển $\rightarrow$ OCR $\rightarrow$ Chuẩn hoá (Strip/Upper) $\rightarrow$ Tra cứu CSDL $\rightarrow$ Ra quyết định (Mở/Đóng/Tính phí).
+
+---
+
+## 3. Database (Cơ sở dữ liệu)
+**Công nghệ sử dụng:**
+- **Core:** PostgreSQL (Hoạt động trong Docker container).
+- **Driver:** `psycopg2` (Kết nối từ Python xuống DB qua truy vấn SQL thô/raw SQL).
+
+**Cấu trúc Lược đồ (Schema) chính:**
+1. **`cudan` (Bảng Cư Dân):**
+   - Lưu thông định danh: Biển số, tên, số căn hộ, SĐT.
+   - Trạng thái đóng phí: `da_thanh_toan` (Boolean).
+   - Dữ liệu hình ảnh (Avatar): `anh_dang_ky` (Lưu trực tiếp dạng Base64 string).
+2. **`lichsuravao` (Bảng Lịch sử):**
+   - Theo dõi mốc thời gian (Timestamp), trạng thái (`Vao`, `Ra`, `Tu choi`).
+   - Cột này đóng vai trò tính toán **Quota (Sức chứa bãi)** bằng công thức đếm số lượng trạng thái `Vao` chưa có trạng thái `Ra`.
+3. **`doanh_thu` (Bảng Doanh Thu):**
+   - Lưu trữ lịch sử đóng tiền tháng của cư dân (`MONTHLY`) và tiền lượt của khách (`VISITOR`).
+
+---
+
+## 4. Hardware & IoT (Phần cứng & Giao tiếp)
+**Công nghệ sử dụng:**
+- **Microcontrollers (Vi điều khiển):** 
+  - **ESP8266 (NodeMCU):** Xử lý mạch trung tâm (Cảm biến, Barries, Loa, Màn hình). Code bằng `C++ / Arduino IDE`.
+  - **ESP32-CAM:** Camera IP không dây truyền luồng JPEG qua HTTP.
+- **Cảm biến & Cơ cấu chấp hành:**
+  - 5x Cảm biến vật cản hồng ngoại (IR Sensor): 2 cái kích hoạt cổng, 3 cái báo ô đỗ.
+  - 2x Động cơ Servo 180°: Mô phỏng thanh barrie (Cổng Vào / Cổng Ra).
+  - Màn hình LCD 16x2 I2C & Buzzer cảnh báo.
+
+**Giao thức kết nối (IoT Protocol):**
+- Giao tiếp qua **HTTP REST API (Mạng LAN WiFi)**.
+- **Push Method:** ESP8266 liên tục gọi `POST /api/hardware/status` định kỳ (1.5s/lần) để đẩy mảng `sensors[]` lên Server.
+- **Trigger-based AI:** Khi xe đè lên cảm biến (IR = LOW), ESP đẩy `gate_trigger=1` (hoặc 2). Server nhận được sẽ chộp ảnh từ ESP32-CAM, chạy AI, rồi trả về lệnh JSON `{"open_gate": 1, "cmd": "open"}` trong chính Response đó.
+- ESP8266 có cơ chế "Vòng lặp an toàn chống bám đuôi" (Anti-passback) hoạt động độc lập để chống kẹt barrie.
+
+---
+
+## 5. Cấu trúc Môi trường & Triển khai (Docker & Server)
+- **Môi trường Server:** Windows Host chạy Python Local.
+- **Docker Compose (`docker-compose.yml`):**
+  - Đóng gói Database PostgreSQL thành 1 container độc lập.
+  - Dễ dàng di chuyển, không rác rưởi hệ điều hành, đảm bảo môi trường CSDL sạch sẽ và mapping Volume ra ngoài để backup.
+- **Mạng cục bộ (LAN Hotspot):** Laptop chạy Server phát Mobile Hotspot. Các thiết bị ESP bắt WiFi hotspot này để liên kết với IP nội bộ của Laptop (thường là `192.168.137.1`), không phụ thuộc internet ngoại mạng.
+
+---
+
+## 6. Logic Nghiệp vụ & Kỹ thuật cốt lõi (Core Business Rules)
+1. **Kiểm soát sức chứa (Capacity Enforcement):** Tính toán bằng SQL aggregation (đếm số xe trong bảng Lịch sử). Block thủ công lẫn AI nếu bãi quá tải.
+2. **Rule Thanh toán (Payment Wall):**
+   - Cư dân `da_thanh_toan = False` bị giáng cấp quyền xuống như vãng lai (không tự mở cổng).
+   - Xoá Cache Bộ nhớ ngay lập tức (Reset Cooldown AI) khi nạp tiền thành công để mở cổng trong tích tắc.
+3. **Chống Spam (Cooldown Cache):** Biển số chỉ được quét và ghi log 1 lần mỗi 30 giây để tránh sập CSDL do xe dừng lấp cảm biến.
+4. **An toàn Vật lý (Physical Safety):** Code C++ ESP8266 từ chối đóng barrie nếu cảm biến vòng lặp (Loop detector) vẫn đang bị xe đè. Sập barrie cứng rắn sau 2s khi lọt đuôi để cưỡng chế quét AI xe bám đuôi.
