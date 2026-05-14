@@ -20,6 +20,13 @@
  * ============================================================
  */
 
+/*
+ * ============================================================
+ * SmartPark ESP8266 – Firmware v3.2 (Thêm Báo Cháy Khẩn Cấp)
+ * Giao tiếp 2 chiều với FastAPI Server
+ * ============================================================
+ */
+
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
@@ -39,17 +46,19 @@ const int irInPin   = 3;   // RX  – Cảm biến cổng VÀO (rút khi nạp c
 const int irOutPin  = 13;  // D7  – Cảm biến cổng RA
 const int irSlot1   = 0;   // D3  – Ô đỗ 1
 const int irSlot2   = 2;   // D4  – Ô đỗ 2
-const int irSlot3   = 16;  // D0  – Ô đỗ 3`   
+const int irSlot3   = 16;  // D0  – Ô đỗ 3
 const int buzzerPin = 15;  // D8  – Còi
 const int servoInPin  = 12; // D6  – Servo cổng vào
 const int servoOutPin = 14; // D5  – Servo cổng ra
 
+// [ĐÃ COMMENT] Khai báo chân cảm biến cháy
+ const int fireSensorPin = A0;  // A0 - Cảm biến báo cháy (Analog)
+
 // ─── CẤU HÌNH WIFI & SERVER ───────────────────────────────────
-// ⚠ ĐỔI CÁC GIÁ TRỊ NÀY CHO ĐÚNG VỚI MÔI TRƯỜNG CỦA BẠN ⚠
-const char* ssid     = "LAPTOP-71LM2GV2 7594";   // Tên WiFi / hotspot
-const char* password = "12345678";                 // Mật khẩu WiFi
-const char* serverIP = "192.168.137.1";            // IP máy tính (chạy ipconfig để kiểm tra)
-const int   serverPort = 8000;                     // Cổng FastAPI
+const char* ssid     = "LAPTOP-71LM2GV2 7594"; 
+const char* password = "12345678";                 
+const char* serverIP = "192.168.137.1";            
+const int   serverPort = 8000;                     
 
 // ─── TIMING ───────────────────────────────────────────────────
 const unsigned long STATUS_INTERVAL    = 1500;  // ms – Gửi cảm biến lên server
@@ -64,6 +73,9 @@ bool isGateActive    = false;
 bool irInTriggered   = false;
 bool irOutTriggered  = false;
 
+// [ĐĐ COMMENT] Biến lưu trạng thái cháy
+ bool isFireDetected  = false; 
+
 unsigned long lastStatusTime    = 0;
 unsigned long lastHeartbeatTime = 0;
 unsigned long lastLcdTime       = 0;
@@ -71,10 +83,13 @@ unsigned long lastWifiCheck     = 0;
 
 WiFiClient wifiClient;
 
+float sinVal;
+int toneVal;
+
 // ═══════════════════════════════════════════════════════════════
 void setup() {
   Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
-  Serial.println("\n=== SmartPark ESP8266 v3.1 ===");
+  Serial.println("\n=== SmartPark ===");
 
   // Khởi tạo chân
   pinMode(irInPin,   INPUT);
@@ -84,6 +99,9 @@ void setup() {
   pinMode(irSlot3,   INPUT);
   pinMode(buzzerPin, OUTPUT);
   digitalWrite(buzzerPin, LOW);
+
+  // [ĐÃ COMMENT] Khởi tạo chân cảm biến cháy
+   pinMode(fireSensorPin, INPUT);
 
   // Servo về vị trí đóng (0°)
   servoIn.attach(servoInPin);
@@ -95,12 +113,12 @@ void setup() {
   Wire.begin(4, 5); // SDA=D2(GPIO4), SCL=D1(GPIO5)
   lcd.init();
   lcd.backlight();
-  lcdPrint("SmartPark v3.1", "Dang ket noi...");
+  lcdPrint("SmartPark ", "Dang ket noi...");
 
   // Kết nối WiFi
   connectWiFi();
 
-  beep(2);
+  beep1(2);
   delay(1000);
   lcd.clear();
 }
@@ -124,9 +142,6 @@ void connectWiFi() {
     lcdPrint("WiFi OK!", WiFi.localIP().toString().c_str());
   } else {
     Serial.printf("\n[WiFi] THAT BAI! Status: %d\n", WiFi.status());
-    // 1=IDLE, 4=CONNECT_FAILED, 6=DISCONNECTED, 255=NO_SHIELD
-    // WL_NO_SSID_AVAIL=1: Sai ten WiFi / WiFi tat
-    // WL_CONNECT_FAILED=4: Sai mat khau
     lcdPrint("WiFi THAT BAI!", String("Code:") + String(WiFi.status()));
   }
 }
@@ -144,6 +159,11 @@ void loop() {
     }
   }
 
+  // [ĐÃ COMMENT] ── Kiểm tra cảm biến báo cháy liên tục ─────────
+  
+  int fireVal = analogRead(fireSensorPin);
+  isFireDetected = (fireVal < 500); // Áp tụt xuống dưới 500 là có lửa
+  
   // ── 1. Đọc cảm biến cổng (chỉ khi cổng không đang hoạt động) ──
   if (!isGateActive) {
     irInTriggered  = (digitalRead(irInPin)  == LOW);
@@ -191,9 +211,6 @@ void sendStatusToServer() {
   }
 
   // Build JSON body
-  // sensors: [IR_vao, IR_ra, Slot1, Slot2, Slot3]
-  // Cảm biến IR: 1 = có xe (LOW), 0 = không có xe (HIGH)
-  // Slot: 1 = đầy (LOW), 0 = trống (HIGH)
   String body = "{";
   body += "\"sensors\":[";
   body += String(irInTriggered ? 1 : 0) + ",";
@@ -201,10 +218,14 @@ void sendStatusToServer() {
   body += String(s1 == LOW ? 1 : 0) + ",";
   body += String(s2 == LOW ? 1 : 0) + ",";
   body += String(s3 == LOW ? 1 : 0);
+  
+  // -- BUILD JSON KHI BẬT BÁO CHÁY --
   body += "],";
   body += "\"gate_trigger\":" + String(trigger) + ",";
+  body += "\"fire_alarm\":" + String(isFireDetected ? 1 : 0) + ","; 
   body += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
   body += "}";
+  
 
   HTTPClient http;
   String url = "http://" + String(serverIP) + ":" + String(serverPort) + "/api/hardware/status";
@@ -226,9 +247,9 @@ void sendStatusToServer() {
 
       Serial.printf("[SERVER] open_gate=%d cmd=%s\n", openGate, cmd);
 
-      // Nếu server ra lệnh mở cổng
-      if (openGate > 0 && strcmp(cmd, "open") == 0) {
-        Serial.printf("[CMD] Nhan lenh mo cong %d tu server\n", openGate);
+      // Nếu server ra lệnh mở hoặc đóng cổng
+      if (openGate > 0 && (strcmp(cmd, "open") == 0 || strcmp(cmd, "emergency") == 0 || strcmp(cmd, "close_all") == 0)) {
+        Serial.printf("[CMD] Nhan lenh tu server: gate=%d, cmd=%s\n", openGate, cmd);
         executeOpenGate(openGate);
       }
     } else {
@@ -285,10 +306,9 @@ void executeOpenGate(int gateId) {
     // ─── Cổng VÀO ────────────────────────────────────────────
     Serial.println("[GATE] >>> MO CONG VAO <<<");
     lcdPrint(">> Xe Vao <<", "Cho trong: " + String(availableSlots > 0 ? availableSlots - 1 : 0));
-    beep(1);
+    beep1(1);
 
-    // Mở barrier: góc 90° (điều chỉnh theo servo thực tế)
-    servoIn.write(90);
+    servoIn.write(180);
     delay(GATE_OPEN_MS);
     servoIn.write(0); // Đóng lại
 
@@ -296,12 +316,36 @@ void executeOpenGate(int gateId) {
     // ─── Cổng RA ─────────────────────────────────────────────
     Serial.println("[GATE] <<< MO CONG RA >>>");
     lcdPrint("<< Xe Ra >>", "Cam on!");
-    beep(1);
+    beep1(1);
 
-    servoOut.write(90);
-    delay(GATE_OPEN_MS);
     servoOut.write(0);
+    delay(GATE_OPEN_MS);
+    servoOut.write(180);
+  } 
+  
+  // [ĐÃ COMMENT] ─── TÌNH TRẠNG KHẨN CẤP: MỞ CẢ 2 CỔNG ──────────
+  
+  else if (gateId == 3) {
+    Serial.println("[EMERGENCY] <<< CHAY! MO TOAN BO CONG >>>");
+    lcdPrint("!! CHAY !!", "DI TAN NGAY !!!");
+    beep2(5); // Hú còi 5 tiếng dài
+    
+    servoIn.write(180);
+    servoOut.write(0);
+    // Lưu ý: Trong tình huống cháy, mình KHÔNG gọi hàm đóng cổng (write 0)
+    // Cổng sẽ giữ trạng thái mở toang cho đến khi bạn reset mạch.
+    // Nếu bạn muốn nó đóng lại sau 1 khoảng thời gian, bạn có thể thêm delay vào đây.
   }
+
+  else if (gateId == 4) {
+    Serial.println("[SAFE] <<< HET CHAY! DONG CONG >>>");
+    lcdPrint("AN TOAN", "Hoat dong bth");
+    servoIn.write(0);
+    servoOut.write(180);
+    delay(2000);
+    beep2(0);
+  }
+  
 
   isGateActive = false;
   lcd.clear();
@@ -311,18 +355,30 @@ void executeOpenGate(int gateId) {
 // LCD: Cập nhật hiển thị trạng thái bãi xe
 // ═══════════════════════════════════════════════════════════════
 void updateLCD() {
+  // Bỏ qua cập nhật màn hình bình thường nếu đang cháy
+  if (isFireDetected) {
+     return; // Giữ nguyên chữ cảnh báo cháy trên màn hình
+  }
+
   int s1 = digitalRead(irSlot1);
   int s2 = digitalRead(irSlot2);
   int s3 = digitalRead(irSlot3);
   availableSlots = (s1 == HIGH) + (s2 == HIGH) + (s3 == HIGH);
 
-  // Dòng 1: số chỗ trống + trạng thái WiFi
+   if (availableSlots == 0) {
+    lcd.clear();
+
+    lcd.setCursor(0, 0);
+    lcd.print("!!! BAI XE DAY");
+    beep1(1);
+    return;
+  }
+
+  // Dòng 1: số chỗ trống 
   lcd.setCursor(0, 0);
   lcd.print("Cho trong: ");
   lcd.print(availableSlots);
   lcd.print("   ");
-  lcd.setCursor(15, 0);
-  lcd.print(WiFi.status() == WL_CONNECTED ? "W" : "!");
 
   // Dòng 2: trạng thái từng ô đỗ (F=đầy, E=trống)
   lcd.setCursor(0, 1);
@@ -350,11 +406,29 @@ void lcdPrint(String line1, const char* line2) {
   lcdPrint(line1, String(line2));
 }
 
-void beep(int times) {
+void beep1(int times) {
   for (int i = 0; i < times; i++) {
     digitalWrite(buzzerPin, HIGH);
     delay(100);
     digitalWrite(buzzerPin, LOW);
     delay(100);
   }
+}
+
+void beep2(int times) {
+  if (times == 0) {
+    noTone(buzzerPin);
+    digitalWrite(buzzerPin, LOW);
+    return;
+  }
+  for (int t = 0; t < times; t++) {
+    for (int i = 0; i < 180; i++) {
+        sinVal = sin(i * (3.1412 / 180));   
+        toneVal = 2000 + (int)(sinVal * 1000); 
+        tone(buzzerPin, toneVal);
+        delay(2);
+    }
+  }
+  noTone(buzzerPin); // Tắt âm sau khi hú xong
+  digitalWrite(buzzerPin, LOW);
 }

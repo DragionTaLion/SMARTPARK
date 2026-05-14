@@ -39,6 +39,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import requests
+from ultralytics import YOLO
+from core.segmentation import segment_characters
+from core.char_recognizer import predict_plate_text, load_char_model
 import threading
 import serial
 import math
@@ -136,8 +139,8 @@ class AppState:
     def __init__(self):
         # Mặc định 2 cổng
         self.gates = {
-            1: GateState(1, "192.168.137.81"), # Làn Vào
-            2: GateState(2, "192.168.137.94")  # Làn Ra
+            1: GateState(1, "192.168.137.30"), # Làn Vào
+            2: GateState(2, "192.168.137.39")  # Làn Ra
         }
         self.sensor_states = [0, 0, 0, 0, 0] # Trạng thái 5 cảm biến IR
         
@@ -150,15 +153,15 @@ class AppState:
         self.is_running: bool = True
         self.active_connections: List[WebSocket] = []
         self.ser: Optional[serial.Serial] = None
-        self.com_port: str = "COM3"
-        self.esp8266_ip: str = "192.168.137.32"
+        self.com_port: str = "COM5"
+        self.esp8266_ip: str = "192.168.137.139"
         self.camera_mode: str = "esp32"
         
         # Cooldown per plate
         self.last_plate_time: dict = {}
         self.last_plate_status: dict = {}  # plate -> 'Vao' | 'Ra'
         
-        # Hàng đợi lệnh mở cổng cho ESP (visitor pay)
+        # Hàng đợi lệnh mở cổng cho ESP (visitor@ pay)
         self.pending_open_gates: List[int] = []
         self.main_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -355,7 +358,7 @@ async def lifespan(app: FastAPI):
     print(f"  [2/2] Đang tải Character model: {CHAR_MODEL_PATH}")
     if os.path.exists(CHAR_MODEL_PATH):
         try:
-            state.char_model = YOLO(CHAR_MODEL_PATH)
+            state.char_model = load_char_model(CHAR_MODEL_PATH)
             state.char_model.to(device)
             print(f"  ✅ Character model đã tải (device={device})")
         except Exception as e:
@@ -703,28 +706,17 @@ def process_frame_core(frame: np.ndarray) -> dict:
     plate_text = ""
     try:
         if state.char_model is not None:
-            char_results = state.char_model.predict(plate_crop, conf=0.4, verbose=False)
-            if len(char_results) > 0:
-                chars = []
-                for c_box in char_results[0].boxes:
-                    x1_c, y1_c, x2_c, y2_c = c_box.xyxy[0]
-                    cls_idx = int(c_box.cls[0])
-                    char_val = state.char_model.names[cls_idx]
-                    chars.append({'val': char_val, 'x': (x1_c + x2_c) / 2, 'y': (y1_c + y2_c) / 2})
-                if chars:
-                    y_coords = [c['y'] for c in chars]
-                    min_y, max_y = min(y_coords), max(y_coords)
-                    is_two_line = (max_y - min_y) > (plate_crop.shape[0] / 4)
-                    if is_two_line:
-                        mid_y = (min_y + max_y) / 2
-                        line1 = sorted([c for c in chars if c['y'] < mid_y], key=lambda c: c['x'])
-                        line2 = sorted([c for c in chars if c['y'] >= mid_y], key=lambda c: c['x'])
-                        plate_text = "".join([c['val'] for c in line1]) + "".join([c['val'] for c in line2])
-                    else:
-                        chars.sort(key=lambda c: c['x'])
-                        plate_text = "".join([c['val'] for c in chars])
+            char_images = segment_characters(plate_crop, target_size=32)
+            print(f"  🔍 Segmentation: tìm thấy {len(char_images) if char_images else 0} ký tự")
+            if char_images:
+                plate_text = predict_plate_text(state.char_model, char_images, conf_threshold=0.3)
         
+        # Encode ảnh crop ngay cả khi OCR thất bại để debug
+        _, buffer = cv2.imencode('.jpg', plate_crop)
+        img_base64 = base64.b64encode(buffer).decode('utf-8')
+
         if not plate_text:
+            print(f"  ⚠️ OCR thất bại cho biển số tại [{x1}, {y1}, {x2}, {y2}]")
             return {
                 "detected": True,
                 "plate": "",
@@ -732,6 +724,7 @@ def process_frame_core(frame: np.ndarray) -> dict:
                 "bbox": [int(x1), int(y1), int(x2), int(y2)],
                 "processed": False,
                 "reason": "OCR không đọc được",
+                "plate_crop_base64": img_base64
             }
     except Exception as e:
         return {"detected": True, "plate": "", "confidence": best_conf,
@@ -1067,7 +1060,29 @@ async def video_feed(gate_id: int = 1):
     def gen():
         while True:
             if gate.latest_frame is not None:
-                _, jpeg = cv2.imencode('.jpg', gate.latest_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                display_frame = gate.latest_frame.copy()
+                h, w = display_frame.shape[:2]
+                
+                # Vẽ khung quét tĩnh (ROI)
+                roi_w, roi_h = 400, 200
+                roi_x1, roi_y1 = (w - roi_w) // 2, (h - roi_h) // 2
+                cv2.rectangle(display_frame, (roi_x1, roi_y1), (roi_x1 + roi_w, roi_y1 + roi_h), (255, 255, 0), 2)
+                cv2.putText(display_frame, "VUNG QUET BIEN SO", (roi_x1, roi_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                
+                # Vẽ khung xanh/đỏ động nếu có kết quả nhận diện gần đây
+                if hasattr(gate, 'last_detection_result') and gate.last_detection_result:
+                    res, ts = gate.last_detection_result
+                    if time.time() - ts < 3.0:
+                        bbox = res.get("bbox")
+                        if bbox and len(bbox) == 4:
+                            x1, y1, x2, y2 = bbox
+                            color = (0, 255, 0) if res.get("is_resident") else (0, 0, 255)
+                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 3)
+                            
+                            label = f"{res.get('plate', '')} {'(Cu dan)' if res.get('is_resident') else '(Khach)'}"
+                            cv2.putText(display_frame, label, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+                _, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
             time.sleep(0.04)
@@ -1605,8 +1620,9 @@ async def set_camera_source(body: ConfigSource):
 
 # ── 1. ESP8266 PUSH dữ liệu cảm biến lên Server ─────────────────────────────
 class HardwareStatus(BaseModel):
-    sensors: List[int]    # [S1, S2, S3, S4, S5] – 0: Trống, 1: Có xe
+    sensors: List[int]    # [S1, S2, S3] – 0: Trống, 1: Có xe
     gate_trigger: int = 0 # 0: Không, 1: Cổng Vào, 2: Cổng Ra
+    fire_alarm: int = 0   # 1: Có cháy, 0: Bình thường
     ip: Optional[str] = None  # ESP tự báo IP của nó (tuỳ chọn)
 
 @app.post("/api/hardware/status", tags=["Hardware"])
@@ -1634,8 +1650,30 @@ async def update_hardware_status(body: HardwareStatus):
 
     response = {"status": "ok", "open_gate": 0, "cmd": "none"}
 
+    # Ưu tiên cao nhất: Xử lý báo cháy khẩn cấp
+    if body.fire_alarm == 1:
+        esp_state.is_fire_active = True
+        print("[EMERGENCY]  PHÁT HIỆN CHÁY ! MỞ TOÀN BỘ CỔNG!")
+        response["open_gate"] = 3
+        response["cmd"] = "emergency"
+        
+        # Phát sóng trạng thái khẩn cấp cho Web UI
+        asyncio.create_task(broadcast_detection({
+            "type": "fire_alarm",
+            "message": " CẢNH BÁO CHÁY! Đang mở toàn bộ cổng!",
+            "timestamp": time.strftime("%H:%M:%S")
+        }))
+    elif getattr(esp_state, 'is_fire_active', False) and body.fire_alarm == 0:
+        # Sự kiện: Vừa hết cháy (chuyển từ 1 về 0)
+        esp_state.is_fire_active = False
+        print("[SAFE] ĐÃ HẾT CHÁY ! ĐÓNG TOÀN BỘ CỔNG!")
+        
+        # Gửi ID 4 để ra lệnh cho ESP đóng 2 cổng lại
+        response["open_gate"] = 4  
+        response["cmd"] = "close_all"
+           
     # Kiểm tra hàng đợi lệnh (từ visitor/pay hoặc mở thủ công)
-    if esp_state.command_queue:
+    elif esp_state.command_queue:
         cmd = esp_state.command_queue.pop(0)
         response["open_gate"] = cmd.get("gate", 0)
         response["cmd"] = cmd.get("cmd", "none")
@@ -1862,7 +1900,15 @@ async def open_manual(gate_id: int):
         frame = gate.latest_frame.copy()
         res = process_frame_core(frame)
         plate = res.get("plate") or "[THỦ CÔNG]"
-        img_base64 = res.get("plate_crop_base64") or ""
+        img_base64 = res.get("plate_crop_base64")
+        
+        # Nếu AI không tìm thấy biển số (res rỗng), dùng ảnh toàn cảnh làm log
+        if not img_base64:
+            h, w = frame.shape[:2]
+            small_frame = cv2.resize(frame, (640, int(h * 640 / w)))
+            _, buffer = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            img_base64 = base64.b64encode(buffer).decode('utf-8')
+            res["plate_crop_base64"] = img_base64 # Để lát nữa gửi WebSocket
         
         insert_history(plate, trang_thai, img_base64, gate_id=gate_id)
         
