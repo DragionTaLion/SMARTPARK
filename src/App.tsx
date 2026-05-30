@@ -5,7 +5,7 @@ import {
   Camera, Cpu, Save, Filter, XCircle, Users, AlertTriangle,
   Wifi, WifiOff, RefreshCw, Plus, Trash2, Shield,
   Gamepad2, Info, Server, Database, Edit, LayoutGrid,
-  Banknote, TrendingUp, Zap, Calendar, MapPin
+  Banknote, TrendingUp, Zap, Calendar, MapPin, Flame
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -121,6 +121,7 @@ export default function App() {
   const [visitorFee, setVisitorFee] = useState(20000); // Mặc định 20k/lượt
   const [payingVisitor, setPayingVisitor] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
+  const [fireAlert, setFireAlert] = useState<{ active: boolean; message: string; timestamp: string } | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -273,6 +274,17 @@ export default function App() {
             ...slot,
             status: !!msg.sensors[idx + 2]
           })));
+        }
+
+        // 4. Báo cháy khẩn cấp
+        if (msg.type === 'fire_alarm') {
+          if (msg.active) {
+            setFireAlert({ active: true, message: msg.message, timestamp: msg.timestamp });
+          } else {
+            setFireAlert({ active: false, message: msg.message, timestamp: msg.timestamp });
+            // Tự ẩn thông báo "đã hết cháy" sau 10 giây
+            setTimeout(() => setFireAlert(null), 10000);
+          }
         }
       } catch (err) {
         console.warn("WS Message error:", err);
@@ -505,19 +517,6 @@ export default function App() {
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setNewResident(prev => ({
-        ...prev,
-        anh_dang_ky: (reader.result as string).split(',')[1] // Lấy phần Base64
-      }));
-    };
-    reader.readAsDataURL(file);
-  };
-
   const handleScanResidentPlate = async () => {
     setScanningForRegistration(true);
     setAddError('');
@@ -592,6 +591,60 @@ export default function App() {
     <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
       {/* Hidden canvas dùng để capture frame */}
       <canvas ref={canvasRef} className="hidden" />
+
+      {/* ══ FIRE ALARM OVERLAY ══ */}
+      <AnimatePresence>
+        {fireAlert && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9999] pointer-events-none"
+          >
+            {/* Viền nhấp nháy */}
+            {fireAlert.active && (
+              <div className="absolute inset-0 border-[6px] border-red-500 animate-pulse" />
+            )}
+            {/* Banner */}
+            <motion.div
+              initial={{ y: -100 }}
+              animate={{ y: 0 }}
+              exit={{ y: -100 }}
+              className={`pointer-events-auto absolute top-0 left-0 right-0 flex items-center justify-between gap-4 px-8 py-4 text-white shadow-2xl ${
+                fireAlert.active
+                  ? 'bg-gradient-to-r from-red-600 via-red-500 to-orange-500'
+                  : 'bg-gradient-to-r from-emerald-600 to-emerald-500'
+              }`}
+            >
+              <div className="flex items-center gap-4">
+                <div className={`p-2 bg-white/20 rounded-xl ${fireAlert.active ? 'animate-bounce' : ''}`}>
+                  {fireAlert.active
+                    ? <Flame size={28} className="text-white" />
+                    : <Shield size={28} className="text-white" />
+                  }
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-[0.25em] text-white/70">
+                    {fireAlert.active ? 'CẢNH BÁO KHẨN CẤP' : 'TÌNH TRẠNG ĐÃ ĐƯỢC KIỂM SOÁT'}
+                  </p>
+                  <p className="text-xl font-black tracking-tight">{fireAlert.message}</p>
+                </div>
+                <div className="hidden md:flex items-center gap-2 ml-4 px-4 py-2 bg-white/20 rounded-xl border border-white/30">
+                  <span className="text-[10px] font-black uppercase">Lúc</span>
+                  <span className="text-sm font-black font-mono">{fireAlert.timestamp}</span>
+                </div>
+              </div>
+              <button
+                onClick={() => setFireAlert(null)}
+                className="p-2 bg-white/20 hover:bg-white/30 rounded-xl transition-all border border-white/20 flex-shrink-0"
+                title="Đóng cảnh báo"
+              >
+                <XCircle size={20} />
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ── Sidebar ── */}
       <aside className="w-64 glass-sidebar flex flex-col shrink-0 z-40 relative">
@@ -1075,10 +1128,14 @@ export default function App() {
                         <div className="flex-1">
                           <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-2">Ảnh biển số đăng ký</label>
                           <div className="flex gap-2">
-                            <label className="cursor-pointer bg-white border border-slate-200 px-3 py-1.5 rounded-lg text-[10px] font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm">
-                              Chọn ảnh...
-                              <input type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
-                            </label>
+                            <button
+                              onClick={handleScanResidentPlate}
+                              disabled={scanningForRegistration}
+                              className="flex items-center gap-1.5 bg-emerald-50 text-emerald-600 border border-emerald-100 px-3 py-1.5 rounded-lg text-[10px] font-bold hover:bg-emerald-100 transition-all disabled:opacity-50 shadow-sm"
+                            >
+                              {scanningForRegistration ? <RefreshCw size={12} className="animate-spin" /> : <Camera size={12} />}
+                              Quét từ Camera
+                            </button>
                             {newResident.anh_dang_ky && (
                               <button
                                 onClick={() => setNewResident(prev => ({ ...prev, anh_dang_ky: '' }))}
@@ -1109,17 +1166,6 @@ export default function App() {
                           className="text-slate-500 hover:bg-slate-100 px-4 py-2.5 rounded-xl text-xs font-bold transition-all"
                         >
                           Hủy bỏ
-                        </button>
-                      )}
-
-                      {!newResident.id && (
-                        <button
-                          onClick={handleScanResidentPlate}
-                          disabled={scanningForRegistration}
-                          className="flex items-center gap-2 bg-emerald-50 text-emerald-600 border border-emerald-100 px-4 py-2.5 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-all disabled:opacity-50 ml-auto"
-                        >
-                          {scanningForRegistration ? <RefreshCw size={14} className="animate-spin" /> : <Camera size={14} />}
-                          Quét từ Camera
                         </button>
                       )}
                     </div>

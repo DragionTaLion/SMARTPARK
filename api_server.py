@@ -67,7 +67,7 @@ CHAR_MODEL_PATH = "runs/classify/data/models/char_model/weights/best.pt"  # Path
 # ═══════════════════════════════════════════════════════════════════════════
 DB_CONFIG = {
     "host": "localhost",
-    "port": 55432,  # Docker container port
+    "port": 54321,  # Docker container port (54321:5432)
     "dbname": "nhan_dien_bien_so_xe",
     "user": "postgres",
     "password": "postgres",
@@ -436,6 +436,7 @@ class ESP8266State:
         self.last_command: dict = {}           # Lệnh cuối cùng chờ ESP lấy
         self.sensor_data: dict = {}            # Dữ liệu cảm biến mới nhất
         self.command_queue: List[dict] = []    # Hàng đợi lệnh ESP chưa lấy
+        self.is_fire_active: bool = False      # Trạng thái cháy hiện tại
 
 esp_state = ESP8266State()
 
@@ -1740,6 +1741,7 @@ class HardwareStatus(BaseModel):
     sensors: List[int]    # [S1, S2, S3, S4, S5] – 0: Trống, 1: Có xe
     gate_trigger: int = 0 # 0: Không, 1: Cổng Vào, 2: Cổng Ra
     ip: Optional[str] = None  # ESP tự báo IP của nó (tuỳ chọn)
+    fire_alarm: int = 0   # 0: Bình thường, 1: PHÁT HIỆN CHÁY
 
 @app.post("/api/hardware/status", tags=["Hardware"])
 async def update_hardware_status(body: HardwareStatus):
@@ -1766,8 +1768,33 @@ async def update_hardware_status(body: HardwareStatus):
 
     response = {"status": "ok", "open_gate": 0, "cmd": "none"}
 
-    # Kiểm tra hàng đợi lệnh (từ visitor/pay hoặc mở thủ công)
-    if esp_state.command_queue:
+    # ══ ƯU TIÊN CAO NHẤT: Xử lý báo cháy khẩn cấp ══
+    if body.fire_alarm == 1:
+        esp_state.is_fire_active = True
+        print("[EMERGENCY] 🔥 PHÁT HIỆN CHÁY! MỞ TOÀN BỘ CỔNG!")
+        response["open_gate"] = 3
+        response["cmd"] = "emergency"
+        asyncio.create_task(broadcast_detection({
+            "type": "fire_alarm",
+            "active": True,
+            "message": "🔥 CẢNH BÁO CHÁY! Đang mở toàn bộ cổng!",
+            "timestamp": time.strftime("%H:%M:%S")
+        }))
+    elif esp_state.is_fire_active and body.fire_alarm == 0:
+        # Sự kiện: Vừa hết cháy (chuyển từ 1 về 0)
+        esp_state.is_fire_active = False
+        print("[SAFE] ✅ ĐÃ HẾT CHÁY! ĐÓNG TOÀN BỘ CỔNG!")
+        response["open_gate"] = 4
+        response["cmd"] = "close_all"
+        asyncio.create_task(broadcast_detection({
+            "type": "fire_alarm",
+            "active": False,
+            "message": "✅ Tình huống khẩn cấp đã kết thúc. Hệ thống trở về bình thường.",
+            "timestamp": time.strftime("%H:%M:%S")
+        }))
+
+    # Kiểm tra hàng đợi lệnh (từ visitor/pay hoặc mở thủ công) — bỏ qua nếu đang khẩn cấp
+    elif esp_state.command_queue:
         cmd = esp_state.command_queue.pop(0)
         response["open_gate"] = cmd.get("gate", 0)
         response["cmd"] = cmd.get("cmd", "none")
